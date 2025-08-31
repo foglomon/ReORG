@@ -98,5 +98,3 @@ Use a config file (e.g., JSON) for customizable settings like LLM model path, pr
 - Test with sample data: Create a test dir with nested files referencing each other.
 - Extendability: Add flags for custom prompts, model selection, or inference parameters (e.g., temperature).
 - Error Handling: Use try-except blocks extensively, with user-friendly messages for LLM loading failures or out-of-memory errors.
-
-This plan provides a robust foundation; actual code would implement these steps modularly for maintainability, with a focus on privacy through local processing.
