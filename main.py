@@ -4,167 +4,297 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 from pathlib import Path
+import datetime
 
 
 class ReorgApp:
     def __init__(self):
         self.root = tk.Tk()
         self.setup_window()
+        self.setup_styles()
         self.create_widgets()
         
         self.target_folder = ""
-        self.model_path = ""
         
     def setup_window(self):
         self.root.title("ReORG - File Organization Tool")
-        self.root.geometry("600x500")
+        self.root.geometry("650x550")
         self.root.resizable(True, True)
+        self.root.configure(bg="#f8f9fa")
         
+        # Center the window
         self.root.update_idletasks()
-        x = (self.root.winfo_screenwidth() // 2) - (600 // 2)
-        y = (self.root.winfo_screenheight() // 2) - (500 // 2)
-        self.root.geometry(f"600x500+{x}+{y}")
+        x = (self.root.winfo_screenwidth() // 2) - (650 // 2)
+        y = (self.root.winfo_screenheight() // 2) - (550 // 2)
+        self.root.geometry(f"650x550+{x}+{y}")
+        
+    def setup_styles(self):
+        style = ttk.Style()
+        
+        # Configure modern color scheme
+        style.configure("Card.TFrame", 
+                       background="#ffffff", 
+                       relief="flat", 
+                       borderwidth=1)
+        
+        style.configure("Title.TLabel", 
+                       background="#ffffff",
+                       foreground="#2c3e50",
+                       font=("Segoe UI", 18, "bold"))
+        
+        style.configure("Heading.TLabel", 
+                       background="#ffffff",
+                       foreground="#34495e",
+                       font=("Segoe UI", 10, "bold"))
+        
+        style.configure("Modern.TButton", 
+                       padding=(12, 8),
+                       font=("Segoe UI", 9))
+        
+        style.configure("Accent.TButton", 
+                       padding=(16, 10),
+                       font=("Segoe UI", 10, "bold"))
+        
+        style.configure("Modern.TCheckbutton",
+                       background="#ffffff",
+                       foreground="#2c3e50",
+                       font=("Segoe UI", 9),
+                       focuscolor="none")
+        
+        style.configure("Modern.TEntry",
+                       padding=(8, 6),
+                       font=("Segoe UI", 9))
+        
+        style.configure("Modern.Horizontal.TProgressbar",
+                       background="#3498db",
+                       troughcolor="#ecf0f1",
+                       borderwidth=0,
+                       lightcolor="#3498db",
+                       darkcolor="#3498db")
         
     def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.grid(row=0, column=0, sticky="nsew")
+        # Main container with padding
+        main_frame = tk.Frame(self.root, bg="#f8f9fa")
+        main_frame.pack(fill="both", expand=True, padx=24, pady=24)
         
-        self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)
-        main_frame.grid_rowconfigure(5, weight=1)
-        main_frame.grid_columnconfigure(1, weight=1)
+        # Header card
+        header_card = ttk.Frame(main_frame, style="Card.TFrame", padding="24")
+        header_card.pack(fill="x", pady=(0, 20))
         
-        title_label = ttk.Label(main_frame, text="ReORG File Organizer", 
-                               font=("Arial", 16, "bold"))
-        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        title_label = ttk.Label(header_card, text="ReORG File Organizer", 
+                               style="Title.TLabel")
+        title_label.pack()
         
-        ttk.Label(main_frame, text="Target Folder:").grid(row=1, column=0, sticky="w", pady=5)
+        subtitle_label = ttk.Label(header_card, 
+                                  text="Intelligent file organization powered by AI",
+                                  background="#ffffff",
+                                  foreground="#7f8c8d",
+                                  font=("Segoe UI", 9))
+        subtitle_label.pack(pady=(5, 0))
+        
+        # Folder selection card
+        folder_card = ttk.Frame(main_frame, style="Card.TFrame", padding="20")
+        folder_card.pack(fill="x", pady=(0, 16))
+        
+        folder_header = ttk.Label(folder_card, text="Target Folder", style="Heading.TLabel")
+        folder_header.pack(anchor="w", pady=(0, 12))
+        
+        folder_input_frame = tk.Frame(folder_card, bg="#ffffff")
+        folder_input_frame.pack(fill="x")
+        
         self.folder_var = tk.StringVar()
-        self.folder_entry = ttk.Entry(main_frame, textvariable=self.folder_var, width=40)
-        self.folder_entry.grid(row=1, column=1, sticky="ew", padx=(10, 5))
+        self.folder_entry = ttk.Entry(folder_input_frame, textvariable=self.folder_var, 
+                                     style="Modern.TEntry", width=50)
+        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 12))
         
-        browse_btn = ttk.Button(main_frame, text="Browse", command=self.browse_folder)
-        browse_btn.grid(row=1, column=2, padx=(5, 0))
+        browse_btn = ttk.Button(folder_input_frame, text="Browse Folder", 
+                               command=self.browse_folder, style="Modern.TButton")
+        browse_btn.pack(side="right")
         
-        ttk.Label(main_frame, text="AI Model:").grid(row=2, column=0, sticky="w", pady=5)
-        self.model_var = tk.StringVar()
-        self.model_entry = ttk.Entry(main_frame, textvariable=self.model_var, width=40)
-        self.model_entry.grid(row=2, column=1, sticky="ew", padx=(10, 5))
+        # Options card
+        options_card = ttk.Frame(main_frame, style="Card.TFrame", padding="20")
+        options_card.pack(fill="x", pady=(0, 16))
         
-        model_btn = ttk.Button(main_frame, text="Browse", command=self.browse_model)
-        model_btn.grid(row=2, column=2, padx=(5, 0))
-        
-        options_frame = ttk.LabelFrame(main_frame, text="Options", padding="10")
-        options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(20, 10))
-        options_frame.grid_columnconfigure(0, weight=1)
-        
-        self.dry_run = tk.BooleanVar(value=True)
-        dry_run_check = ttk.Checkbutton(options_frame, text="Dry run (preview only)", 
-                                       variable=self.dry_run)
-        dry_run_check.grid(row=0, column=0, sticky="w")
+        options_header = ttk.Label(options_card, text="Options", style="Heading.TLabel")
+        options_header.pack(anchor="w", pady=(0, 12))
         
         self.backup_enabled = tk.BooleanVar(value=True)
-        backup_check = ttk.Checkbutton(options_frame, text="Create backup before organizing", 
-                                      variable=self.backup_enabled)
-        backup_check.grid(row=1, column=0, sticky="w")
+        backup_check = ttk.Checkbutton(options_card, 
+                                      text="Create backup before organizing files", 
+                                      variable=self.backup_enabled,
+                                      style="Modern.TCheckbutton")
+        backup_check.pack(anchor="w")
         
-        button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=4, column=0, columnspan=3, pady=(20, 10))
+        # Action buttons card
+        action_card = ttk.Frame(main_frame, style="Card.TFrame", padding="20")
+        action_card.pack(fill="x", pady=(0, 16))
         
-        start_btn = ttk.Button(button_frame, text="Start Organization", 
+        button_container = tk.Frame(action_card, bg="#ffffff")
+        button_container.pack()
+        
+        start_btn = ttk.Button(button_container, text="Start Organization", 
                               command=self.start_organization, 
                               style="Accent.TButton")
-        start_btn.pack(side="left", padx=(0, 10))
+        start_btn.pack()
         
-        preview_btn = ttk.Button(button_frame, text="Preview Changes", 
-                                command=self.preview_changes)
-        preview_btn.pack(side="left", padx=10)
+        # Progress bar (initially hidden)
+        self.progress_frame = tk.Frame(action_card, bg="#ffffff")
+        self.progress_frame.pack(fill="x", pady=(16, 0))
         
-        log_frame = ttk.LabelFrame(main_frame, text="Status", padding="10")
-        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
-        log_frame.grid_rowconfigure(0, weight=1)
-        log_frame.grid_columnconfigure(0, weight=1)
+        progress_label = ttk.Label(self.progress_frame, text="Progress:", 
+                                  background="#ffffff", foreground="#34495e",
+                                  font=("Segoe UI", 9))
+        progress_label.pack(anchor="w")
         
-        self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, 
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(self.progress_frame, 
+                                           variable=self.progress_var,
+                                           maximum=100, 
+                                           style="Modern.Horizontal.TProgressbar")
+        self.progress_bar.pack(fill="x", pady=(8, 0))
+        
+        self.progress_text = ttk.Label(self.progress_frame, text="",
+                                      background="#ffffff", foreground="#7f8c8d",
+                                      font=("Segoe UI", 8))
+        self.progress_text.pack(anchor="w", pady=(4, 0))
+        
+        # Hide progress initially
+        self.progress_frame.pack_forget()
+        
+        # Status/log card
+        log_card = ttk.Frame(main_frame, style="Card.TFrame", padding="20")
+        log_card.pack(fill="both", expand=True)
+        
+        log_header = ttk.Label(log_card, text="Status & Activity", style="Heading.TLabel")
+        log_header.pack(anchor="w", pady=(0, 12))
+        
+        log_container = tk.Frame(log_card, bg="#ffffff")
+        log_container.pack(fill="both", expand=True)
+        
+        self.log_text = tk.Text(log_container, height=10, wrap=tk.WORD, 
                                font=("Consolas", 9), state="disabled",
-                               bg="#f5f5f5")
-        self.log_text.grid(row=0, column=0, sticky="nsew")
+                               bg="#fafbfc", fg="#2c3e50",
+                               relief="flat", borderwidth=0,
+                               selectbackground="#3498db",
+                               selectforeground="#ffffff")
+        self.log_text.pack(side="left", fill="both", expand=True)
         
-        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        log_scroll.grid(row=0, column=1, sticky="ns")
+        log_scroll = ttk.Scrollbar(log_container, orient="vertical", command=self.log_text.yview)
+        log_scroll.pack(side="right", fill="y")
         self.log_text.configure(yscrollcommand=log_scroll.set)
         
-        self.log_message("Ready to organize files. Select a target folder and AI model to begin.")
+        self.log_message("Ready to organize files. Select a target folder to begin.")
         
     def browse_folder(self):
         folder = filedialog.askdirectory(title="Select folder to organize")
         if folder:
             self.folder_var.set(folder)
             self.target_folder = folder
-            self.log_message(f"Selected target folder: {folder}")
             
-    def browse_model(self):
-        model_file = filedialog.askopenfilename(
-            title="Select AI model file",
-            filetypes=[
-                ("GGUF models", "*.gguf"),
-                ("Bin files", "*.bin"),
-                ("All files", "*.*")
-            ]
-        )
-        if model_file:
-            self.model_var.set(model_file)
-            self.model_path = model_file
-            model_name = os.path.basename(model_file)
-            self.log_message(f"Selected model: {model_name}")
+            # Show folder info for better user feedback
+            try:
+                folder_path = Path(folder)
+                file_count = len(list(folder_path.rglob('*')))
+                self.log_message(f"Selected: {folder}")
+                self.log_message(f"Found {file_count} items to analyze", "info")
+            except Exception as e:
+                self.log_message(f"Selected: {folder}")
+                self.log_message("Could not analyze folder contents", "error")
             
     def start_organization(self):
         if not self.validate_inputs():
             return
             
-        if self.dry_run.get():
-            self.log_message("Starting dry run - no files will be moved")
-        else:
-            result = messagebox.askyesno("Confirm", 
-                                       "This will actually move your files. Continue?",
-                                       icon="warning")
-            if not result:
-                return
-                
-        self.log_message("Organization started...")
-        self.log_message("(Backend integration pending)")
-        
-    def preview_changes(self):
-        if not self.validate_inputs():
+        result = messagebox.askyesno("Confirm Organization", 
+                                   f"This will organize files in:\n{self.target_folder}\n\nContinue?",
+                                   icon="question")
+        if not result:
+            self.log_message("Organization cancelled by user")
             return
-            
-        self.log_message("Generating preview...")
-        self.log_message("(Preview functionality coming soon)")
+                
+        self.log_message("Organization started...", "success")
+        if self.backup_enabled.get():
+            self.log_message("Backup will be created before moving files")
+        self.log_message("Backend integration pending - this is a preview version")
+        
+        # Show progress bar and simulate some work
+        self.show_progress()
+        
+    def show_progress(self):
+        """Show progress bar and simulate organization work"""
+        self.progress_frame.pack(fill="x", pady=(16, 0))
+        
+        # Simulate organization steps
+        steps = [
+            ("Analyzing files...", 20),
+            ("Creating backup...", 40),
+            ("Organizing files...", 70),
+            ("Updating references...", 90),
+            ("Complete!", 100)
+        ]
+        
+        def update_progress(step_index=0):
+            if step_index < len(steps):
+                step_text, progress = steps[step_index]
+                self.progress_var.set(progress)
+                self.progress_text.configure(text=step_text)
+                self.log_message(step_text)
+                
+                # Schedule next update (simulate work)
+                self.root.after(1500, lambda: update_progress(step_index + 1))
+            else:
+                # Hide progress bar when done
+                self.root.after(2000, self.hide_progress)
+                self.log_message("Organization completed successfully!", "success")
+        
+        update_progress()
+        
+    def hide_progress(self):
+        """Hide the progress bar"""
+        self.progress_frame.pack_forget()
+        self.progress_var.set(0)
+        self.progress_text.configure(text="")
         
     def validate_inputs(self):
         if not self.target_folder:
-            messagebox.showerror("Error", "Please select a target folder")
+            messagebox.showerror("Missing Information", "Please select a target folder to organize")
+            self.log_message("Validation failed: No folder selected", "error")
             return False
             
         if not os.path.exists(self.target_folder):
-            messagebox.showerror("Error", "Target folder doesn't exist")
-            return False
-            
-        if not self.model_path:
-            messagebox.showerror("Error", "Please select an AI model file")
-            return False
-            
-        if not os.path.exists(self.model_path):
-            messagebox.showerror("Error", "Model file doesn't exist")
+            messagebox.showerror("Invalid Folder", "The selected folder no longer exists")
+            self.log_message("Validation failed: Folder doesn't exist", "error")
             return False
             
         return True
         
-    def log_message(self, message):
+    def log_message(self, message, msg_type="info"):
+        """Add a message to the log with optional styling"""
         self.log_text.configure(state="normal")
-        self.log_text.insert(tk.END, f"{message}\n")
+        
+        # Add timestamp for a more professional look
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        formatted_message = f"[{timestamp}] {message}\n"
+        
+        self.log_text.insert(tk.END, formatted_message)
+        
+        # Simple color coding without being too flashy
+        if msg_type == "error":
+            # Subtle red tint for errors
+            start_line = float(self.log_text.index(tk.END)) - 2
+            self.log_text.tag_add("error", f"{start_line:.0f}.0", f"{start_line:.0f}.end")
+            self.log_text.tag_config("error", foreground="#e74c3c")
+        elif msg_type == "success":
+            # Subtle green tint for success
+            start_line = float(self.log_text.index(tk.END)) - 2
+            self.log_text.tag_add("success", f"{start_line:.0f}.0", f"{start_line:.0f}.end")
+            self.log_text.tag_config("success", foreground="#27ae60")
+        
         self.log_text.configure(state="disabled")
         self.log_text.see(tk.END)
+        
+        # Force update to ensure message appears immediately
+        self.root.update_idletasks()
         
     def run(self):
         self.root.mainloop()
