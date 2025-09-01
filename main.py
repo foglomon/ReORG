@@ -18,15 +18,15 @@ class ReorgApp:
         
     def setup_window(self):
         self.root.title("ReORG - File Organization Tool")
-        self.root.geometry("650x550")
+        self.root.geometry("650x650")
         self.root.resizable(True, True)
         self.root.configure(bg="#f8f9fa")
         
         # Center the window
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth() // 2) - (650 // 2)
-        y = (self.root.winfo_screenheight() // 2) - (550 // 2)
-        self.root.geometry(f"650x550+{x}+{y}")
+        y = (self.root.winfo_screenheight() // 2) - (650 // 2)
+        self.root.geometry(f"650x650+{x}+{y}")
         
     def setup_styles(self):
         style = ttk.Style()
