@@ -1,37 +1,41 @@
-#!/usr/bin/env python3
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
-from pathlib import Path
 import datetime
+from pathlib import Path
+
+from sort import (
+    IntelligentFileSorter, FileInfo, SortCriteria, FileCategory, 
+    format_file_size, create_test_files
+)
 
 
 class ReorgApp:
+    
     def __init__(self):
         self.root = tk.Tk()
+        self.intelligent_sorter = IntelligentFileSorter()
+        self.current_plan = {}
+        
         self.setup_window()
         self.setup_styles()
         self.create_widgets()
         
-        self.target_folder = ""
-        
     def setup_window(self):
-        self.root.title("ReORG - File Organization Tool")
-        self.root.geometry("650x650")
+        self.root.title("ReORG - Intelligent File Organization Tool")
+        self.root.geometry("900x750")
         self.root.resizable(True, True)
         self.root.configure(bg="#f8f9fa")
         
-        # Center the window
         self.root.update_idletasks()
-        x = (self.root.winfo_screenwidth() // 2) - (650 // 2)
-        y = (self.root.winfo_screenheight() // 2) - (650 // 2)
-        self.root.geometry(f"650x650+{x}+{y}")
+        x = (self.root.winfo_screenwidth() // 2) - (450)
+        y = (self.root.winfo_screenheight() // 2) - (375)
+        self.root.geometry(f"900x750+{x}+{y}")
         
     def setup_styles(self):
         style = ttk.Style()
         
-        # Configure modern color scheme
         style.configure("Card.TFrame", 
                        background="#ffffff", 
                        relief="flat", 
@@ -45,256 +49,461 @@ class ReorgApp:
         style.configure("Heading.TLabel", 
                        background="#ffffff",
                        foreground="#34495e",
-                       font=("Segoe UI", 10, "bold"))
-        
-        style.configure("Modern.TButton", 
-                       padding=(12, 8),
-                       font=("Segoe UI", 9))
-        
-        style.configure("Accent.TButton", 
-                       padding=(16, 10),
-                       font=("Segoe UI", 10, "bold"))
-        
-        style.configure("Modern.TCheckbutton",
-                       background="#ffffff",
-                       foreground="#2c3e50",
-                       font=("Segoe UI", 9),
-                       focuscolor="none")
-        
-        style.configure("Modern.TEntry",
-                       padding=(8, 6),
-                       font=("Segoe UI", 9))
-        
-        style.configure("Modern.Horizontal.TProgressbar",
-                       background="#3498db",
-                       troughcolor="#ecf0f1",
-                       borderwidth=0,
-                       lightcolor="#3498db",
-                       darkcolor="#3498db")
+                       font=("Segoe UI", 12, "bold"))
         
     def create_widgets(self):
-        # Main container with padding
-        main_frame = tk.Frame(self.root, bg="#f8f9fa")
-        main_frame.pack(fill="both", expand=True, padx=24, pady=24)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Header card
-        header_card = ttk.Frame(main_frame, style="Card.TFrame", padding="24")
-        header_card.pack(fill="x", pady=(0, 20))
+        self.create_intelligent_tab()
         
-        title_label = ttk.Label(header_card, text="ReORG File Organizer", 
+        self.create_simple_tab()
+        
+    def create_intelligent_tab(self):
+        intel_frame = ttk.Frame(self.notebook)
+        self.notebook.add(intel_frame, text="🧠 Intelligent Sorting")
+        
+        title_frame = ttk.Frame(intel_frame, style="Card.TFrame")
+        title_frame.pack(fill="x", padx=20, pady=(20, 10))
+        
+        title_label = ttk.Label(title_frame, 
+                               text="🧠 Intelligent File Sorter", 
                                style="Title.TLabel")
-        title_label.pack()
+        title_label.pack(pady=20)
         
-        subtitle_label = ttk.Label(header_card, 
-                                  text="Intelligent file organization powered by AI",
-                                  background="#ffffff",
-                                  foreground="#7f8c8d",
-                                  font=("Segoe UI", 9))
-        subtitle_label.pack(pady=(5, 0))
+        source_frame = ttk.LabelFrame(intel_frame, text="Source Folder", padding="10")
+        source_frame.pack(fill="x", padx=20, pady=(0, 10))
+        source_frame.columnconfigure(1, weight=1)
         
-        # Folder selection card
-        folder_card = ttk.Frame(main_frame, style="Card.TFrame", padding="20")
-        folder_card.pack(fill="x", pady=(0, 16))
+        ttk.Label(source_frame, text="Folder to organize:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        self.source_folder_var = tk.StringVar()
+        self.source_entry = ttk.Entry(source_frame, textvariable=self.source_folder_var)
+        self.source_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
         
-        folder_header = ttk.Label(folder_card, text="Target Folder", style="Heading.TLabel")
-        folder_header.pack(anchor="w", pady=(0, 12))
+        ttk.Button(source_frame, text="Browse", 
+                  command=self.browse_source_folder).grid(row=0, column=2, padx=(0, 10))
+        ttk.Button(source_frame, text="Create Test Files", 
+                  command=self.create_test_files).grid(row=0, column=3, padx=(0, 10))
+        ttk.Button(source_frame, text="Scan Folder", 
+                  command=self.scan_folder).grid(row=0, column=4)
         
-        folder_input_frame = tk.Frame(folder_card, bg="#ffffff")
-        folder_input_frame.pack(fill="x")
+        analysis_frame = ttk.LabelFrame(intel_frame, text="File Analysis", padding="10")
+        analysis_frame.pack(fill="x", padx=20, pady=(0, 10))
+        analysis_frame.columnconfigure(0, weight=1)
         
-        self.folder_var = tk.StringVar()
-        self.folder_entry = ttk.Entry(folder_input_frame, textvariable=self.folder_var, 
-                                     style="Modern.TEntry", width=50)
-        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 12))
+        self.stats_text = tk.Text(analysis_frame, height=4, wrap=tk.WORD)
+        self.stats_text.pack(fill="x", pady=(0, 10))
         
-        browse_btn = ttk.Button(folder_input_frame, text="Browse Folder", 
-                               command=self.browse_folder, style="Modern.TButton")
-        browse_btn.pack(side="right")
+        columns = ("File", "Type", "Size", "Modified", "Category")
+        self.file_tree = ttk.Treeview(analysis_frame, columns=columns, show="headings", height=6)
         
-        # Options card
-        options_card = ttk.Frame(main_frame, style="Card.TFrame", padding="20")
-        options_card.pack(fill="x", pady=(0, 16))
+        for col in columns:
+            self.file_tree.heading(col, text=col)
+            if col == "File":
+                self.file_tree.column(col, width=200)
+            elif col == "Size":
+                self.file_tree.column(col, width=80)
+            else:
+                self.file_tree.column(col, width=100)
         
-        options_header = ttk.Label(options_card, text="Options", style="Heading.TLabel")
-        options_header.pack(anchor="w", pady=(0, 12))
+        file_scrollbar = ttk.Scrollbar(analysis_frame, orient=tk.VERTICAL, command=self.file_tree.yview)
+        self.file_tree.configure(yscrollcommand=file_scrollbar.set)
         
-        self.backup_enabled = tk.BooleanVar(value=True)
-        backup_check = ttk.Checkbutton(options_card, 
-                                      text="Create backup before organizing files", 
-                                      variable=self.backup_enabled,
-                                      style="Modern.TCheckbutton")
-        backup_check.pack(anchor="w")
+        self.file_tree.pack(side="left", fill="both", expand=True)
+        file_scrollbar.pack(side="right", fill="y")
         
-        # Action buttons card
-        action_card = ttk.Frame(main_frame, style="Card.TFrame", padding="20")
-        action_card.pack(fill="x", pady=(0, 16))
+        rec_frame = ttk.LabelFrame(intel_frame, text="Smart Recommendations", padding="10")
+        rec_frame.pack(fill="x", padx=20, pady=(0, 10))
+        rec_frame.columnconfigure(0, weight=1)
         
-        button_container = tk.Frame(action_card, bg="#ffffff")
-        button_container.pack()
+        self.recommendations_text = tk.Text(rec_frame, height=3, wrap=tk.WORD)
+        self.recommendations_text.pack(fill="x")
         
-        start_btn = ttk.Button(button_container, text="Start Organization", 
-                              command=self.start_organization, 
-                              style="Accent.TButton")
-        start_btn.pack()
+        org_frame = ttk.LabelFrame(intel_frame, text="Organization Settings", padding="10")
+        org_frame.pack(fill="x", padx=20, pady=(0, 10))
+        org_frame.columnconfigure(1, weight=1)
         
-        # Progress bar (initially hidden)
-        self.progress_frame = tk.Frame(action_card, bg="#ffffff")
-        self.progress_frame.pack(fill="x", pady=(16, 0))
+        ttk.Label(org_frame, text="Sort by:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        self.sort_strategy_var = tk.StringVar()
+        strategy_combo = ttk.Combobox(org_frame, textvariable=self.sort_strategy_var, 
+                                    values=[
+                                        "File Type", "Date (Year)", "Date (Month)", 
+                                        "File Size", "Project/Topic", "File Extension"
+                                    ], state="readonly")
+        strategy_combo.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
         
-        progress_label = ttk.Label(self.progress_frame, text="Progress:", 
-                                  background="#ffffff", foreground="#34495e",
-                                  font=("Segoe UI", 9))
-        progress_label.pack(anchor="w")
+        ttk.Button(org_frame, text="Use Recommended", 
+                  command=self.use_recommended_strategy).grid(row=0, column=2, padx=(0, 10))
         
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(self.progress_frame, 
-                                           variable=self.progress_var,
-                                           maximum=100, 
-                                           style="Modern.Horizontal.TProgressbar")
-        self.progress_bar.pack(fill="x", pady=(8, 0))
+        ttk.Label(org_frame, text="Target folder:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=(10, 0))
+        self.target_folder_var = tk.StringVar()
+        target_entry = ttk.Entry(org_frame, textvariable=self.target_folder_var)
+        target_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(0, 10), pady=(10, 0))
         
-        self.progress_text = ttk.Label(self.progress_frame, text="",
-                                      background="#ffffff", foreground="#7f8c8d",
-                                      font=("Segoe UI", 8))
-        self.progress_text.pack(anchor="w", pady=(4, 0))
+        ttk.Button(org_frame, text="Browse", 
+                  command=self.browse_target_folder).grid(row=1, column=2, pady=(10, 0))
         
-        # Hide progress initially
-        self.progress_frame.pack_forget()
+        options_subframe = ttk.Frame(org_frame)
+        options_subframe.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10, 0))
         
-        # Status/log card
-        log_card = ttk.Frame(main_frame, style="Card.TFrame", padding="20")
-        log_card.pack(fill="both", expand=True)
+        self.dry_run_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_subframe, text="Dry run (preview only)", 
+                       variable=self.dry_run_var).pack(side=tk.LEFT, padx=(0, 20))
         
-        log_header = ttk.Label(log_card, text="Status & Activity", style="Heading.TLabel")
-        log_header.pack(anchor="w", pady=(0, 12))
+        self.create_folders_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_subframe, text="Create folder structure", 
+                       variable=self.create_folders_var).pack(side=tk.LEFT)
         
-        log_container = tk.Frame(log_card, bg="#ffffff")
-        log_container.pack(fill="both", expand=True)
+        action_frame = ttk.Frame(org_frame)
+        action_frame.grid(row=3, column=0, columnspan=3, pady=(15, 0))
         
-        self.log_text = tk.Text(log_container, height=10, wrap=tk.WORD, 
-                               font=("Consolas", 9), state="disabled",
-                               bg="#fafbfc", fg="#2c3e50",
-                               relief="flat", borderwidth=0,
-                               selectbackground="#3498db",
-                               selectforeground="#ffffff")
-        self.log_text.pack(side="left", fill="both", expand=True)
+        ttk.Button(action_frame, text="📋 Preview Organization", 
+                  command=self.preview_organization).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(action_frame, text="🗂️ Organize Files", 
+                  command=self.organize_files).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(action_frame, text="🧹 Clear All", 
+                  command=self.clear_all).pack(side=tk.LEFT)
         
-        log_scroll = ttk.Scrollbar(log_container, orient="vertical", command=self.log_text.yview)
-        log_scroll.pack(side="right", fill="y")
-        self.log_text.configure(yscrollcommand=log_scroll.set)
+        results_frame = ttk.LabelFrame(intel_frame, text="Organization Preview", padding="10")
+        results_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        results_frame.columnconfigure(0, weight=1)
+        results_frame.rowconfigure(0, weight=1)
         
-        self.log_message("Ready to organize files. Select a target folder to begin.")
+        self.results_text = tk.Text(results_frame, height=8, wrap=tk.WORD)
+        self.results_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-    def browse_folder(self):
+        results_scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.results_text.yview)
+        self.results_text.configure(yscrollcommand=results_scrollbar.set)
+        results_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        
+    def create_simple_tab(self):
+        simple_frame = ttk.Frame(self.notebook)
+        self.notebook.add(simple_frame, text="📁 Simple Organization")
+        
+        title_frame = ttk.Frame(simple_frame, style="Card.TFrame")
+        title_frame.pack(fill="x", padx=20, pady=(20, 10))
+        
+        title_label = ttk.Label(title_frame, 
+                               text="📁 Simple File Organization", 
+                               style="Title.TLabel")
+        title_label.pack(pady=20)
+        
+        quick_frame = ttk.LabelFrame(simple_frame, text="Quick Organization", padding="15")
+        quick_frame.pack(fill="x", padx=20, pady=(0, 10))
+        
+        folder_subframe = ttk.Frame(quick_frame)
+        folder_subframe.pack(fill="x", pady=(0, 15))
+        
+        ttk.Label(folder_subframe, text="Select folder:").pack(side="left", padx=(0, 10))
+        self.simple_folder_var = tk.StringVar()
+        folder_entry = ttk.Entry(folder_subframe, textvariable=self.simple_folder_var)
+        folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        ttk.Button(folder_subframe, text="Browse", 
+                  command=self.browse_simple_folder).pack(side="left")
+        
+        action_subframe = ttk.Frame(quick_frame)
+        action_subframe.pack(fill="x")
+        
+        ttk.Button(action_subframe, text="📊 Organize by Type", 
+                  command=lambda: self.quick_organize(SortCriteria.TYPE)).pack(side="left", padx=(0, 10))
+        ttk.Button(action_subframe, text="📅 Organize by Date", 
+                  command=lambda: self.quick_organize(SortCriteria.YEAR)).pack(side="left", padx=(0, 10))
+        ttk.Button(action_subframe, text="🎯 Smart Organize", 
+                  command=self.smart_organize).pack(side="left")
+        
+        log_frame = ttk.LabelFrame(simple_frame, text="Activity Log", padding="10")
+        log_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        
+        self.simple_log_text = tk.Text(log_frame, wrap=tk.WORD)
+        self.simple_log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        simple_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.simple_log_text.yview)
+        self.simple_log_text.configure(yscrollcommand=simple_scrollbar.set)
+        simple_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        
+    def browse_source_folder(self):
         folder = filedialog.askdirectory(title="Select folder to organize")
         if folder:
-            self.folder_var.set(folder)
-            self.target_folder = folder
+            self.source_folder_var.set(folder)
             
-            # Show folder info for better user feedback
+    def browse_target_folder(self):
+        folder = filedialog.askdirectory(title="Select target folder for organized files")
+        if folder:
+            self.target_folder_var.set(folder)
+    
+    def create_test_files(self):
+        folder = filedialog.askdirectory(title="Select folder for test files")
+        if folder:
             try:
-                folder_path = Path(folder)
-                file_count = len(list(folder_path.rglob('*')))
-                self.log_message(f"Selected: {folder}")
-                self.log_message(f"Found {file_count} items to analyze", "info")
+                create_test_files(folder)
+                self.source_folder_var.set(folder)
+                messagebox.showinfo("Success", f"Test files created in {folder}")
             except Exception as e:
-                self.log_message(f"Selected: {folder}")
-                self.log_message("Could not analyze folder contents", "error")
-            
-    def start_organization(self):
-        if not self.validate_inputs():
+                messagebox.showerror("Error", f"Failed to create test files: {str(e)}")
+    
+    def scan_folder(self):
+        source_folder = self.source_folder_var.get()
+        if not source_folder:
+            messagebox.showerror("Error", "Please select a source folder first")
             return
-            
-        result = messagebox.askyesno("Confirm Organization", 
-                                   f"This will organize files in:\n{self.target_folder}\n\nContinue?",
-                                   icon="question")
-        if not result:
-            self.log_message("Organization cancelled by user")
+        
+        if not os.path.exists(source_folder):
+            messagebox.showerror("Error", "Selected folder does not exist")
             return
-                
-        self.log_message("Organization started...", "success")
-        if self.backup_enabled.get():
-            self.log_message("Backup will be created before moving files")
-        self.log_message("Backend integration pending - this is a preview version")
         
-        # Show progress bar and simulate some work
-        self.show_progress()
+        try:
+            self.log_output("🔍 Scanning folder...")
+            self.root.update()
+            
+            files = self.intelligent_sorter.scan_folder(source_folder)
+            
+            for item in self.file_tree.get_children():
+                self.file_tree.delete(item)
+            
+            # Populate file list (show first 20 files)
+            for file_info in files[:20]:
+                relative_path = file_info.path.relative_to(Path(source_folder))
+                self.file_tree.insert("", "end", values=(
+                    str(relative_path),
+                    file_info.extension or "N/A",
+                    format_file_size(file_info.size),
+                    file_info.modified_date.strftime("%Y-%m-%d"),
+                    file_info.category.value
+                ))
+            
+            stats = self.intelligent_sorter.get_file_statistics()
+            stats_text = f"📊 Analysis Results:\n"
+            stats_text += f"Total files: {stats['total_files']}\n"
+            stats_text += f"Total size: {format_file_size(stats['total_size'])}\n"
+            stats_text += f"Categories: {', '.join([f'{k}({v})' for k, v in stats['categories'].items()])}\n"
+            
+            if stats['date_range']['oldest'] and stats['date_range']['newest']:
+                stats_text += f"Date range: {stats['date_range']['oldest'].strftime('%Y-%m-%d')} to {stats['date_range']['newest'].strftime('%Y-%m-%d')}"
+            
+            self.stats_text.delete(1.0, tk.END)
+            self.stats_text.insert(1.0, stats_text)
+            
+            recommendation = self.intelligent_sorter.get_recommended_sort_strategy()
+            rec_text = f"🎯 Smart Recommendation:\n"
+            rec_text += f"Strategy: {recommendation['primary_strategy'].value}\n"
+            rec_text += f"Reason: {recommendation['reason']}\n"
+            rec_text += f"Confidence: {recommendation['confidence']}%"
+            
+            if recommendation['alternatives']:
+                rec_text += f"\nAlternatives: {', '.join([alt['strategy'].value for alt in recommendation['alternatives']])}"
+            
+            self.recommendations_text.delete(1.0, tk.END)
+            self.recommendations_text.insert(1.0, rec_text)
+            
+            self.current_recommendation = recommendation
+            
+            self.log_output(f"✅ Scan complete! Found {len(files)} files")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to scan folder: {str(e)}")
+            self.log_output(f"❌ Scan failed: {str(e)}")
+    
+    def use_recommended_strategy(self):
+        if hasattr(self, 'current_recommendation'):
+            strategy_map = {
+                SortCriteria.TYPE: "File Type",
+                SortCriteria.YEAR: "Date (Year)",
+                SortCriteria.MONTH: "Date (Month)",
+                SortCriteria.SIZE: "File Size",
+                SortCriteria.PROJECT: "Project/Topic",
+                SortCriteria.EXTENSION: "File Extension"
+            }
+            
+            recommended = strategy_map.get(self.current_recommendation['primary_strategy'], "File Type")
+            self.sort_strategy_var.set(recommended)
+        else:
+            messagebox.showwarning("Warning", "Please scan a folder first to get recommendations")
+    
+    def preview_organization(self):
+        if not self.intelligent_sorter.files_info:
+            messagebox.showerror("Error", "Please scan a folder first")
+            return
         
-    def show_progress(self):
-        """Show progress bar and simulate organization work"""
-        self.progress_frame.pack(fill="x", pady=(16, 0))
+        strategy = self._get_selected_strategy()
+        if not strategy:
+            messagebox.showerror("Error", "Please select a sorting strategy")
+            return
         
-        # Simulate organization steps
-        steps = [
-            ("Analyzing files...", 20),
-            ("Creating backup...", 40),
-            ("Organizing files...", 70),
-            ("Updating references...", 90),
-            ("Complete!", 100)
-        ]
+        try:
+            target_folder = self.target_folder_var.get() or "organized_files"
+            plan = self.intelligent_sorter.organize_files(target_folder, strategy, dry_run=True)
+            self.current_plan = plan
+            
+            summary = self.intelligent_sorter.get_organization_summary(plan)
+            self.results_text.delete(1.0, tk.END)
+            self.results_text.insert(1.0, summary)
+            
+            self.log_output(f"📋 Preview generated for {sum(len(files) for files in plan.values())} files")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate preview: {str(e)}")
+    
+    def organize_files(self):
+        if not self.current_plan:
+            messagebox.showerror("Error", "Please generate a preview first")
+            return
         
-        def update_progress(step_index=0):
-            if step_index < len(steps):
-                step_text, progress = steps[step_index]
-                self.progress_var.set(progress)
-                self.progress_text.configure(text=step_text)
-                self.log_message(step_text)
-                
-                # Schedule next update (simulate work)
-                self.root.after(1500, lambda: update_progress(step_index + 1))
+        target_folder = self.target_folder_var.get()
+        if not target_folder:
+            messagebox.showerror("Error", "Please select a target folder")
+            return
+        
+        strategy = self._get_selected_strategy()
+        if not strategy:
+            messagebox.showerror("Error", "Please select a sorting strategy")
+            return
+        
+        if not self.dry_run_var.get():
+            total_files = sum(len(files) for files in self.current_plan.values())
+            result = messagebox.askyesno(
+                "Confirm Organization", 
+                f"This will move {total_files} files to {target_folder}.\n\nAre you sure you want to proceed?"
+            )
+            if not result:
+                return
+        
+        try:
+            plan = self.intelligent_sorter.organize_files(
+                target_folder, 
+                strategy, 
+                dry_run=self.dry_run_var.get(),
+                create_folders=self.create_folders_var.get()
+            )
+            
+            if self.dry_run_var.get():
+                self.log_output("✅ Dry run completed - no files were moved")
             else:
-                # Hide progress bar when done
-                self.root.after(2000, self.hide_progress)
-                self.log_message("Organization completed successfully!", "success")
-        
-        update_progress()
-        
-    def hide_progress(self):
-        """Hide the progress bar"""
-        self.progress_frame.pack_forget()
-        self.progress_var.set(0)
-        self.progress_text.configure(text="")
-        
-    def validate_inputs(self):
-        if not self.target_folder:
-            messagebox.showerror("Missing Information", "Please select a target folder to organize")
-            self.log_message("Validation failed: No folder selected", "error")
-            return False
+                total_files = sum(len(files) for files in plan.values())
+                self.log_output(f"✅ Organization complete! Moved {total_files} files")
+                messagebox.showinfo("Success", f"Successfully organized {total_files} files!")
             
-        if not os.path.exists(self.target_folder):
-            messagebox.showerror("Invalid Folder", "The selected folder no longer exists")
-            self.log_message("Validation failed: Folder doesn't exist", "error")
-            return False
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to organize files: {str(e)}")
+            self.log_output(f"❌ Organization failed: {str(e)}")
+    
+    def _get_selected_strategy(self):
+        strategy_map = {
+            "File Type": SortCriteria.TYPE,
+            "Date (Year)": SortCriteria.YEAR,
+            "Date (Month)": SortCriteria.MONTH,
+            "File Size": SortCriteria.SIZE,
+            "Project/Topic": SortCriteria.PROJECT,
+            "File Extension": SortCriteria.EXTENSION
+        }
+        
+        selected = self.sort_strategy_var.get()
+        return strategy_map.get(selected)
+    
+    def clear_all(self):
+        self.intelligent_sorter = IntelligentFileSorter()
+        self.current_plan = {}
+        if hasattr(self, 'current_recommendation'):
+            delattr(self, 'current_recommendation')
+        
+        self.source_folder_var.set("")
+        self.target_folder_var.set("")
+        self.sort_strategy_var.set("")
+        
+        for item in self.file_tree.get_children():
+            self.file_tree.delete(item)
+        
+        self.stats_text.delete(1.0, tk.END)
+        self.recommendations_text.delete(1.0, tk.END)
+        self.results_text.delete(1.0, tk.END)
+        
+        self.log_output("🧹 All data cleared")
+    
+    def browse_simple_folder(self):
+        folder = filedialog.askdirectory(title="Select folder to organize")
+        if folder:
+            self.simple_folder_var.set(folder)
+    
+    def quick_organize(self, strategy: SortCriteria):
+        folder = self.simple_folder_var.get()
+        if not folder:
+            messagebox.showerror("Error", "Please select a folder first")
+            return
+        
+        try:
+            sorter = IntelligentFileSorter()
+            files = sorter.scan_folder(folder)
             
-        return True
+            result = messagebox.askyesno(
+                "Confirm Organization",
+                f"Organize {len(files)} files in {folder} by {strategy.value.replace('_', ' ')}?"
+            )
+            
+            if result:
+                target = f"{folder}_organized"
+                plan = sorter.organize_files(target, strategy, dry_run=False, create_folders=True)
+                total = sum(len(files) for files in plan.values())
+                
+                self.log_simple_message(f"✅ Organized {total} files by {strategy.value} in {target}")
+                messagebox.showinfo("Success", f"Organized {total} files!")
+            
+        except Exception as e:
+            error_msg = f"❌ Organization failed: {str(e)}"
+            self.log_simple_message(error_msg)
+            messagebox.showerror("Error", error_msg)
+    
+    def smart_organize(self):
+        folder = self.simple_folder_var.get()
+        if not folder:
+            messagebox.showerror("Error", "Please select a folder first")
+            return
         
-    def log_message(self, message, msg_type="info"):
-        """Add a message to the log with optional styling"""
-        self.log_text.configure(state="normal")
-        
-        # Add timestamp for a more professional look
+        try:
+            sorter = IntelligentFileSorter()
+            files = sorter.scan_folder(folder)
+            recommendation = sorter.get_recommended_sort_strategy()
+            
+            strategy_name = recommendation['primary_strategy'].value.replace('_', ' ')
+            result = messagebox.askyesno(
+                "Smart Organization",
+                f"Found {len(files)} files.\n\n"
+                f"Recommended strategy: {strategy_name}\n"
+                f"Reason: {recommendation['reason']}\n"
+                f"Confidence: {recommendation['confidence']}%\n\n"
+                f"Proceed with organization?"
+            )
+            
+            if result:
+                target = f"{folder}_organized"
+                plan = sorter.organize_files(target, recommendation['primary_strategy'], 
+                                           dry_run=False, create_folders=True)
+                total = sum(len(files) for files in plan.values())
+                
+                self.log_simple_message(f"✅ Smart organization complete! {total} files organized by {strategy_name}")
+                messagebox.showinfo("Success", f"Smart organization complete! {total} files organized!")
+            
+        except Exception as e:
+            error_msg = f"❌ Smart organization failed: {str(e)}"
+            self.log_simple_message(error_msg)
+            messagebox.showerror("Error", error_msg)
+    
+    def log_output(self, message):
+        current = self.results_text.get(1.0, tk.END)
+        if current.strip():
+            self.results_text.insert(tk.END, f"\n{message}")
+        else:
+            self.results_text.insert(1.0, message)
+        self.results_text.see(tk.END)
+        self.root.update()
+    
+    def log_simple_message(self, message):
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         formatted_message = f"[{timestamp}] {message}\n"
-        
-        self.log_text.insert(tk.END, formatted_message)
-        
-        # Simple color coding without being too flashy
-        if msg_type == "error":
-            # Subtle red tint for errors
-            start_line = float(self.log_text.index(tk.END)) - 2
-            self.log_text.tag_add("error", f"{start_line:.0f}.0", f"{start_line:.0f}.end")
-            self.log_text.tag_config("error", foreground="#e74c3c")
-        elif msg_type == "success":
-            # Subtle green tint for success
-            start_line = float(self.log_text.index(tk.END)) - 2
-            self.log_text.tag_add("success", f"{start_line:.0f}.0", f"{start_line:.0f}.end")
-            self.log_text.tag_config("success", foreground="#27ae60")
-        
-        self.log_text.configure(state="disabled")
-        self.log_text.see(tk.END)
-        
-        # Force update to ensure message appears immediately
-        self.root.update_idletasks()
+        self.simple_log_text.insert(tk.END, formatted_message)
+        self.simple_log_text.see(tk.END)
+        self.root.update()
         
     def run(self):
         self.root.mainloop()
@@ -304,12 +513,12 @@ def main():
     try:
         app = ReorgApp()
         app.run()
-    except ImportError:
-        print("Error: tkinter not available")
-        print("Install with: sudo apt-get install python3-tk (on Ubuntu)")
+    except ImportError as e:
+        print(f"Error: Missing required module - {e}")
+        print("Make sure all dependencies are installed")
         return 1
     except Exception as e:
-        print(f"Error starting GUI: {e}")
+        print(f"Error starting application: {e}")
         return 1
         
     return 0
