@@ -1,115 +1,232 @@
-# ReORG
+# This Tool is currently under development and may not be fully functional. For any bugs or issues, please open an issue on GitHub.
 
-### Overview
+---
 
-This plan outlines a Python application that automates file organization in a given directory using a local LLM for intelligent categorization to ensure privacy. The app will:
+# ReORG - Intelligent File Organizer
 
-- Accept a target directory as input.
-- Recursively scan all files.
-- Use a local LLM (e.g., via Hugging Face Transformers or llama.cpp) to suggest meaningful, nested folder structures based on file metadata (name, extension, and optionally a content snippet).
-- Move files to their new locations, creating folders as needed.
-- Maintain a mapping of old-to-new paths.
-- Scan text-based files post-move to replace any references to old file paths with the updated ones.
+A Python tool that automatically organizes files by analyzing their actual content, not just their names or extensions. Perfect for cleaning up messy download folders, organizing project files, or sorting any collection of mixed file types.
 
-The app assumes primarily text-based files (e.g., code, docs, Markdown) for path replacement, as binary files (e.g., images, executables) can't be easily modified for string replacements. It handles relative and absolute paths carefully to avoid breaking references. Error handling will be included for issues like permission denies or LLM inference failures. Since the LLM runs locally, all operations are offline, enhancing data privacy by avoiding external API calls.
+## What It Does
 
-### Requirements
+ReORG uses **content-aware detection** to identify what files actually are, then organizes them intelligently:
 
-- **Python Version**: 3.8+ for modern features like pathlib.
-- **Libraries**:
-  - `os` and `shutil`: For file traversal, moving, and directory creation.
-  - `pathlib`: For path manipulation (relative/absolute handling).
-  - `re`: For regex-based path replacement in file contents.
-  - LLM Integration: Use `transformers` from Hugging Face for loading and inferring with local models, or `llama-cpp-python` for efficient quantized models. No API key required.
-  - Optional: `tqdm` for progress bars during long operations; `torch` if using GPU-accelerated models.
-- **External Dependencies**: A downloaded local LLM model (e.g., Llama 3 or Mistral from Hugging Face Model Hub). Requires sufficient hardware (CPU/GPU with at least 8GB RAM for small models; larger models may need more). No internet access needed during runtime.
-- **Assumptions**:
-  - Files are local and accessible.
-  - LLM prompts will be designed to output folder paths in a consistent format (e.g., "category/subcategory").
-  - Path references in files are string literals (e.g., in code or configs); complex cases like encoded paths are out of scope.
-  - Backup original directory before running to prevent data loss.
-  - Local LLM inference may be slower than API calls; optimize with quantization or smaller models.
+- **Detects misnamed files**: Finds JPEGs named `.txt`, PDFs with no extension, etc.
+- **Smart categorization**: Groups files by type, date, size, or project
+- **Magic byte analysis**: Reads file signatures to determine true file types
+- **Version control detection**: Groups files like `app_v1.exe`, `app_v2.1.zip` into organized folders
+- **Flexible organization**: Multiple sorting strategies based on your needs
 
-### Architecture
+## Quick Start
 
-The app will be structured as a command-line tool with modular components:
+```bash
+# Clone and run
+git clone https://github.com/foglomon/ReORG.git
+cd ReORG
+python sort.py
 
-1. **Main Script** (`organize_files.py`): Handles CLI arguments, orchestration, and logging.
-2. **File Scanner Module**: Collects file metadata.
-3. **LLM Classifier Module**: Loads and queries the local LLM for folder suggestions.
-4. **Mover Module**: Handles directory creation and file moves, tracks path mappings.
-5. **Updater Module**: Scans and replaces paths in text files.
-6. **Utils Module**: Helper functions for path normalization, regex patterns, and error logging.
+# This creates test files and shows you how it works
+```
 
-Use a config file (e.g., JSON) for customizable settings like LLM model path, prompt templates, ignored file extensions, dry-run mode, and hardware acceleration (e.g., CUDA).
+## Basic Usage
 
-### Step-by-Step Process
+```python
+from sort import FileSorter
 
-1. **Input and Setup**:
+# Create sorter and scan a folder
+sorter = FileSorter()
+files = sorter.scan_folder("path/to/messy/folder")
 
-   - Parse CLI arguments: `python organize_files.py --target /path/to/dir --model-path /path/to/local/model --dry-run` (dry-run simulates without actual moves).
-   - Validate target directory exists and is accessible.
-   - Create a backup copy of the directory (optional, toggled via flag).
-   - Initialize an empty dictionary for old_path -> new_path mappings.
-   - Load the local LLM once at startup (e.g., using `pipeline("text-generation", model=model_path)` from transformers, or via llama.cpp for faster inference).
+# Get recommendations
+strategy = sorter.recommend_strategy()
+print(f"Recommended: {strategy['strategy'].value}")
+print(f"Reason: {strategy['reason']}")
 
-2. **Scan Files**:
+# Preview organization (dry run)
+plan = sorter.organize_files("organized_output", strategy['strategy'], dry_run=True)
+print(sorter.get_summary(plan))
 
-   - Use `pathlib.Path.rglob('*')` to recursively collect all files (exclude directories).
-   - For each file, store metadata: absolute path, relative path (from target dir), name, extension.
-   - Filter out ignored files (e.g., .git, temp files) via config.
-   - If file count > threshold (e.g., 100), batch LLM inferences for efficiency to manage memory and time.
+# Actually organize files
+sorter.organize_files("organized_output", strategy['strategy'], dry_run=False)
+```
 
-3. **Classify with LLM**:
+## Features
 
-   - For each file (or batch), prepare a prompt: "Based on the file name '{filename}', extension '{ext}', and content snippet '{snippet}' (first 200 chars if text file), suggest a nested folder path like 'category/subcategory' for organization. Output only the path."
-   - Run local LLM inference (e.g., via `pipeline(prompt, max_new_tokens=50)` or llama.cpp equivalent).
-   - Parse response to get suggested path (handle errors like invalid output by retrying with adjusted parameters or defaulting to 'uncategorized').
-   - Compute new absolute path: target_dir / suggested_path / filename.
-   - Resolve conflicts: If new path already exists, append a suffix (e.g., \_1) or prompt user.
-   - Add to mappings: old_abs_path -> new_abs_path, and compute relative versions.
+### Content-Aware Detection
 
-4. **Organize Files**:
+- **Magic byte signatures**: Detects 30+ file types by reading their binary headers
+- **Text analysis**: Identifies scripts, HTML, JSON, XML by content patterns
+- **Office document handling**: Distinguishes between DOC/XLS/PPT and DOCX/XLSX/PPTX
+- **Archive detection**: Properly identifies ZIP, RAR, 7Z regardless of extension
 
-   - Sort moves to handle nested dependencies (e.g., move deepest files first).
-   - For each file:
-     - Create parent directories if needed (`pathlib.Path.mkdir(parents=True)`).
-     - Move file using `shutil.move(old_path, new_path)`.
-   - Log all moves; rollback on failure.
+### Version Control Detection
 
-5. **Update Path References**:
+- **Pattern recognition**: Identifies files like `app_v1.exe`, `tool_v2.1.zip`, `backup_2024.tar`
+- **Smart grouping**: Creates nested folders like `apps/myapp/` containing all versions
+- **Version tracking**: Detects semantic versions (v1.2.3), simple numbers (v1, v2), and release types (beta, final)
+- **Automatic organization**: When 20%+ of files are versioned, recommends version-based sorting
 
-   - Re-scan all files in the reorganized directory (now including new locations).
-   - For text files (check extensions like .py, .md, .txt, .html):
-     - Read content.
-     - Use regex to find potential path strings (e.g., r'[&#34;\']([^)["\']' for quoted paths).
-     - For each match, check if it matches any old relative or absolute path in the mappings.
-     - If yes, replace with the corresponding new path (preserve relativity: compute new relative path from the referencing file's location).
-     - Write updated content back to the file.
-   - Handle edge cases: Escaped paths, URLs (exclude http://), partial matches (use longest-prefix replacement).
-   - Skip binary files or use a library like `chardet` to detect encoding.
+### Smart Organization Strategies
 
-6. **Post-Processing and Output**:
+- **By Type**: Groups into images/, documents/, videos/, etc.
+- **By Version Control**: Creates `apps/appname/` folders for versioned files
+- **By Date**: Organizes by year or month for time-based sorting
+- **By Size**: Separates large files from small ones
+- **By Project**: Attempts to group related files together
+- **By Extension**: Traditional extension-based sorting
 
-   - Verify no broken references (optional: re-scan for old paths).
-   - Generate a report: Summary of moves, updates, and any issues (e.g., as JSON or console output).
-   - Clean up: Remove empty original folders.
-   - Unload the LLM model to free resources.
+### Detection Reports
 
-### Potential Challenges and Mitigations
+```bash
+Content Detection Report
+==============================
 
-- **LLM Performance/Memory**: Local inference can be slow on CPU; mitigate by using quantized models (e.g., GGUF format with llama.cpp), batching, or GPU acceleration if available.
-- **Inaccurate Classifications**: Allow user overrides via interactive mode or refine prompts with examples. Test models for consistency.
-- **Path Relativity**: Always normalize paths (use `pathlib` for os-agnostic handling) and compute relatives dynamically during replacement.
-- **Large Directories**: Add progress bars and chunk processing to avoid memory issues; limit batch sizes based on hardware.
-- **Security**: Sanitize LLM outputs to prevent malicious paths (e.g., validate no ../). Don't execute code from files. Local execution ensures no data leaves the machine.
-- **File Types**: Limit updates to UTF-8 text; log warnings for binaries.
-- **Idempotency**: Ensure the app can be re-run without duplicating folders.
-- **Model Setup**: Initial download of models requires internet, but runtime is offline; document setup steps in README.
+Files analyzed: 156
+Content detected: 142
+Misnamed files: 23
 
-### Implementation Tips
+Files missing extensions:
+  📄 important_document → .pdf
+  📄 vacation_photo → .jpg
+  📄 backup_archive → .zip
 
-- Start with a prototype for a small directory, using a lightweight model like Phi-2 or TinyLlama for testing.
-- Test with sample data: Create a test dir with nested files referencing each other.
-- Extendability: Add flags for custom prompts, model selection, or inference parameters (e.g., temperature).
-- Error Handling: Use try-except blocks extensively, with user-friendly messages for LLM loading failures or out-of-memory errors.
+Files with wrong extensions:
+  ⚠️  music.doc (.doc) → .mp3
+  ⚠️  image.txt (.txt) → .png
+
+Version Control Report
+======================
+
+Files analyzed: 156
+Versioned files: 32
+App groups found: 8
+
+Version groups detected:
+  📦 myapp: 5 files, versions 1.0, 1.1, 2.0, 2.1, 3.0
+  📦 photoshop: 3 files, versions 2023, 2024, beta
+  📦 gamedata: 4 files, versions 1, 2, 3, final
+```
+
+## Command Line Usage
+
+```bash
+# Analyze current directory
+python sort.py
+
+# Organize a specific folder
+python -c "
+from sort import FileSorter
+sorter = FileSorter()
+sorter.scan_folder('Downloads')
+strategy = sorter.recommend_strategy()
+sorter.organize_files('Organized', strategy['strategy'], dry_run=False)
+"
+```
+
+## Supported File Types
+
+| Category      | Extensions                    | Detection Method      |
+| ------------- | ----------------------------- | --------------------- |
+| **Images**    | jpg, png, gif, bmp, webp, ico | Magic bytes           |
+| **Documents** | pdf, doc, docx, txt, rtf, odt | Magic bytes + content |
+| **Videos**    | mp4, avi, mkv, mov, wmv, webm | Magic bytes           |
+| **Audio**     | mp3, wav, flac, aac, ogg      | Magic bytes           |
+| **Archives**  | zip, rar, 7z, tar, gz         | Magic bytes           |
+| **Code**      | py, js, html, css, java, cpp  | Content analysis      |
+| **Data**      | json, xml, csv, sql, yml      | Content patterns      |
+
+## Real-World Examples
+
+### Cleaning Downloads Folder
+
+```
+Before:
+Downloads/
+├── IMG_001 (actually a JPEG)
+├── document.txt (actually a PDF)
+├── file (actually a ZIP archive)
+├── song.doc (actually an MP3)
+└── backup (actually a 7Z archive)
+
+After:
+Organized/
+├── images/IMG_001
+├── documents/document.txt
+├── archives/file
+├── audio/song.doc
+└── archives/backup
+```
+
+### Project Organization
+
+```
+Before: Mixed project files
+After:
+projects/
+├── web_development/
+│   ├── index.html
+│   ├── styles.css
+│   └── script.js
+├── python_scripts/
+│   ├── analyzer.py
+│   └── utils.py
+└── documents/
+    ├── requirements.pdf
+    └── notes.txt
+```
+
+## Advanced Features
+
+### Custom Organization
+
+```python
+# Organize by size categories
+plan = sorter.organize_files("by_size", SortCriteria.SIZE)
+
+# Organize by date for photos
+plan = sorter.organize_files("by_date", SortCriteria.DATE)
+
+# Get detailed statistics
+stats = sorter.get_stats()
+print(f"Misnamed files: {stats['misnamed_files']}")
+print(f"File categories: {stats['categories']}")
+```
+
+### Detection Analysis
+
+```python
+# Get list of problematic files
+misnamed = sorter.get_misnamed_files()
+for file in misnamed:
+    print(f"{file.name}: {file.extension} → .{file.detected_ext}")
+
+# Generate detailed report
+print(sorter.detection_report())
+```
+
+## Requirements
+
+- Python 3.8+
+- No external dependencies (uses only standard library)
+- Works on Windows, macOS, and Linux
+
+## Safety Features
+
+- **Dry run mode**: Preview changes before applying them
+- **Conflict resolution**: Handles duplicate filenames automatically
+- **Error handling**: Graceful failure for permission issues or corrupted files
+- **Backup recommendations**: Always test on copies first
+
+## Limitations
+
+- Large files (>1GB) may take longer to analyze
+- Some exotic file formats aren't recognized
+- Binary file content isn't analyzed (only headers)
+- Requires read permissions on source files
+
+## Contributing
+
+Found a file type that isn't detected correctly? Want to add a new organization strategy? Pull requests welcome!
+
+## License
+
+MIT License - see LICENSE file for details.

@@ -6,8 +6,8 @@ import datetime
 from pathlib import Path
 
 from sort import (
-    IntelligentFileSorter, FileInfo, SortCriteria, FileCategory, 
-    format_file_size, create_test_files
+    FileSorter, FileInfo, SortCriteria, FileCategory, 
+    format_size, create_test_files
 )
 
 
@@ -15,7 +15,7 @@ class ReorgApp:
     
     def __init__(self):
         self.root = tk.Tk()
-        self.intelligent_sorter = IntelligentFileSorter()
+        self.intelligent_sorter = FileSorter()
         self.current_plan = {}
         
         self.setup_window()
@@ -128,7 +128,7 @@ class ReorgApp:
         strategy_combo = ttk.Combobox(org_frame, textvariable=self.sort_strategy_var, 
                                     values=[
                                         "File Type", "Date (Year)", "Date (Month)", 
-                                        "File Size", "Project/Topic", "File Extension"
+                                        "File Size", "Project/Topic", "File Extension", "Version Control"
                                     ], state="readonly")
         strategy_combo.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
         
@@ -208,7 +208,7 @@ class ReorgApp:
         ttk.Button(action_subframe, text="📊 Organize by Type", 
                   command=lambda: self.quick_organize(SortCriteria.TYPE)).pack(side="left", padx=(0, 10))
         ttk.Button(action_subframe, text="📅 Organize by Date", 
-                  command=lambda: self.quick_organize(SortCriteria.YEAR)).pack(side="left", padx=(0, 10))
+                  command=lambda: self.quick_organize(SortCriteria.DATE)).pack(side="left", padx=(0, 10))
         ttk.Button(action_subframe, text="🎯 Smart Organize", 
                   command=self.smart_organize).pack(side="left")
         
@@ -269,31 +269,26 @@ class ReorgApp:
                 self.file_tree.insert("", "end", values=(
                     str(relative_path),
                     file_info.extension or "N/A",
-                    format_file_size(file_info.size),
+                    format_size(file_info.size),
                     file_info.modified_date.strftime("%Y-%m-%d"),
                     file_info.category.value
                 ))
             
-            stats = self.intelligent_sorter.get_file_statistics()
+            stats = self.intelligent_sorter.get_stats()
             stats_text = f"📊 Analysis Results:\n"
             stats_text += f"Total files: {stats['total_files']}\n"
-            stats_text += f"Total size: {format_file_size(stats['total_size'])}\n"
+            stats_text += f"Total size: {format_size(stats['total_size'])}\n"
             stats_text += f"Categories: {', '.join([f'{k}({v})' for k, v in stats['categories'].items()])}\n"
-            
-            if stats['date_range']['oldest'] and stats['date_range']['newest']:
-                stats_text += f"Date range: {stats['date_range']['oldest'].strftime('%Y-%m-%d')} to {stats['date_range']['newest'].strftime('%Y-%m-%d')}"
             
             self.stats_text.delete(1.0, tk.END)
             self.stats_text.insert(1.0, stats_text)
             
-            recommendation = self.intelligent_sorter.get_recommended_sort_strategy()
+            recommendation = self.intelligent_sorter.recommend_strategy()
             rec_text = f"🎯 Smart Recommendation:\n"
-            rec_text += f"Strategy: {recommendation['primary_strategy'].value}\n"
+            rec_text += f"Strategy: {recommendation['strategy'].value}\n"
             rec_text += f"Reason: {recommendation['reason']}\n"
-            rec_text += f"Confidence: {recommendation['confidence']}%"
-            
-            if recommendation['alternatives']:
-                rec_text += f"\nAlternatives: {', '.join([alt['strategy'].value for alt in recommendation['alternatives']])}"
+            if 'confidence' in recommendation:
+                rec_text += f"Confidence: {recommendation['confidence']}%"
             
             self.recommendations_text.delete(1.0, tk.END)
             self.recommendations_text.insert(1.0, rec_text)
@@ -310,14 +305,15 @@ class ReorgApp:
         if hasattr(self, 'current_recommendation'):
             strategy_map = {
                 SortCriteria.TYPE: "File Type",
-                SortCriteria.YEAR: "Date (Year)",
+                SortCriteria.DATE: "Date (Year)",
                 SortCriteria.MONTH: "Date (Month)",
                 SortCriteria.SIZE: "File Size",
                 SortCriteria.PROJECT: "Project/Topic",
-                SortCriteria.EXTENSION: "File Extension"
+                SortCriteria.EXTENSION: "File Extension",
+                SortCriteria.VERSION: "Version Control"
             }
             
-            recommended = strategy_map.get(self.current_recommendation['primary_strategy'], "File Type")
+            recommended = strategy_map.get(self.current_recommendation['strategy'], "File Type")
             self.sort_strategy_var.set(recommended)
         else:
             messagebox.showwarning("Warning", "Please scan a folder first to get recommendations")
@@ -337,7 +333,7 @@ class ReorgApp:
             plan = self.intelligent_sorter.organize_files(target_folder, strategy, dry_run=True)
             self.current_plan = plan
             
-            summary = self.intelligent_sorter.get_organization_summary(plan)
+            summary = self.intelligent_sorter.get_summary(plan)
             self.results_text.delete(1.0, tk.END)
             self.results_text.insert(1.0, summary)
             
@@ -374,8 +370,7 @@ class ReorgApp:
             plan = self.intelligent_sorter.organize_files(
                 target_folder, 
                 strategy, 
-                dry_run=self.dry_run_var.get(),
-                create_folders=self.create_folders_var.get()
+                dry_run=self.dry_run_var.get()
             )
             
             if self.dry_run_var.get():
@@ -392,18 +387,19 @@ class ReorgApp:
     def _get_selected_strategy(self):
         strategy_map = {
             "File Type": SortCriteria.TYPE,
-            "Date (Year)": SortCriteria.YEAR,
-            "Date (Month)": SortCriteria.MONTH,
+            "Date (Year)": SortCriteria.DATE,
+            "Date (Month)": SortCriteria.DATE,
             "File Size": SortCriteria.SIZE,
             "Project/Topic": SortCriteria.PROJECT,
-            "File Extension": SortCriteria.EXTENSION
+            "File Extension": SortCriteria.EXTENSION,
+            "Version Control": SortCriteria.VERSION
         }
         
         selected = self.sort_strategy_var.get()
         return strategy_map.get(selected)
     
     def clear_all(self):
-        self.intelligent_sorter = IntelligentFileSorter()
+        self.intelligent_sorter = FileSorter()
         self.current_plan = {}
         if hasattr(self, 'current_recommendation'):
             delattr(self, 'current_recommendation')
@@ -433,7 +429,7 @@ class ReorgApp:
             return
         
         try:
-            sorter = IntelligentFileSorter()
+            sorter = FileSorter()
             files = sorter.scan_folder(folder)
             
             result = messagebox.askyesno(
@@ -443,7 +439,7 @@ class ReorgApp:
             
             if result:
                 target = f"{folder}_organized"
-                plan = sorter.organize_files(target, strategy, dry_run=False, create_folders=True)
+                plan = sorter.organize_files(target, strategy, dry_run=False)
                 total = sum(len(files) for files in plan.values())
                 
                 self.log_simple_message(f"✅ Organized {total} files by {strategy.value} in {target}")
@@ -461,24 +457,24 @@ class ReorgApp:
             return
         
         try:
-            sorter = IntelligentFileSorter()
+            sorter = FileSorter()
             files = sorter.scan_folder(folder)
-            recommendation = sorter.get_recommended_sort_strategy()
+            recommendation = sorter.recommend_strategy()
             
-            strategy_name = recommendation['primary_strategy'].value.replace('_', ' ')
+            strategy_name = recommendation['strategy'].value.replace('_', ' ')
             result = messagebox.askyesno(
                 "Smart Organization",
                 f"Found {len(files)} files.\n\n"
                 f"Recommended strategy: {strategy_name}\n"
                 f"Reason: {recommendation['reason']}\n"
-                f"Confidence: {recommendation['confidence']}%\n\n"
+                f"Confidence: {recommendation.get('confidence', 'N/A')}%\n\n"
                 f"Proceed with organization?"
             )
             
             if result:
                 target = f"{folder}_organized"
-                plan = sorter.organize_files(target, recommendation['primary_strategy'], 
-                                           dry_run=False, create_folders=True)
+                plan = sorter.organize_files(target, recommendation['strategy'], 
+                                           dry_run=False)
                 total = sum(len(files) for files in plan.values())
                 
                 self.log_simple_message(f"✅ Smart organization complete! {total} files organized by {strategy_name}")
