@@ -1,1 +1,0 @@
-Fix Failed to scan folder. 'FileInfo' has no attribute 'modified_date' error
