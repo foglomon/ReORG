@@ -52,18 +52,15 @@ class ReorgApp:
                        font=("Segoe UI", 12, "bold"))
         
     def create_widgets(self):
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        # Create main intelligent interface directly without tabs
+        self.create_intelligent_interface()
         
-        self.create_intelligent_tab()
+    def create_intelligent_interface(self):
+        # Create main container frame
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
         
-        self.create_simple_tab()
-        
-    def create_intelligent_tab(self):
-        intel_frame = ttk.Frame(self.notebook)
-        self.notebook.add(intel_frame, text="🧠 Intelligent Sorting")
-        
-        title_frame = ttk.Frame(intel_frame, style="Card.TFrame")
+        title_frame = ttk.Frame(main_frame, style="Card.TFrame")
         title_frame.pack(fill="x", padx=20, pady=(20, 10))
         
         title_label = ttk.Label(title_frame, 
@@ -71,7 +68,7 @@ class ReorgApp:
                                style="Title.TLabel")
         title_label.pack(pady=20)
         
-        source_frame = ttk.LabelFrame(intel_frame, text="Source Folder", padding="10")
+        source_frame = ttk.LabelFrame(main_frame, text="Source Folder", padding="10")
         source_frame.pack(fill="x", padx=20, pady=(0, 10))
         source_frame.columnconfigure(1, weight=1)
         
@@ -87,7 +84,7 @@ class ReorgApp:
         ttk.Button(source_frame, text="Scan Folder", 
                   command=self.scan_folder).grid(row=0, column=4)
         
-        analysis_frame = ttk.LabelFrame(intel_frame, text="File Analysis", padding="10")
+        analysis_frame = ttk.LabelFrame(main_frame, text="File Analysis", padding="10")
         analysis_frame.pack(fill="x", padx=20, pady=(0, 10))
         analysis_frame.columnconfigure(0, weight=1)
         
@@ -112,14 +109,14 @@ class ReorgApp:
         self.file_tree.pack(side="left", fill="both", expand=True)
         file_scrollbar.pack(side="right", fill="y")
         
-        rec_frame = ttk.LabelFrame(intel_frame, text="Smart Recommendations", padding="10")
+        rec_frame = ttk.LabelFrame(main_frame, text="Smart Recommendations", padding="10")
         rec_frame.pack(fill="x", padx=20, pady=(0, 10))
         rec_frame.columnconfigure(0, weight=1)
         
         self.recommendations_text = tk.Text(rec_frame, height=3, wrap=tk.WORD)
         self.recommendations_text.pack(fill="x")
         
-        org_frame = ttk.LabelFrame(intel_frame, text="Organization Settings", padding="10")
+        org_frame = ttk.LabelFrame(main_frame, text="Organization Settings", padding="10")
         org_frame.pack(fill="x", padx=20, pady=(0, 10))
         org_frame.columnconfigure(1, weight=1)
         
@@ -164,7 +161,7 @@ class ReorgApp:
         ttk.Button(action_frame, text="🧹 Clear All", 
                   command=self.clear_all).pack(side=tk.LEFT)
         
-        results_frame = ttk.LabelFrame(intel_frame, text="Organization Preview", padding="10")
+        results_frame = ttk.LabelFrame(main_frame, text="Organization Preview", padding="10")
         results_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         results_frame.columnconfigure(0, weight=1)
         results_frame.rowconfigure(0, weight=1)
@@ -175,54 +172,6 @@ class ReorgApp:
         results_scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.results_text.yview)
         self.results_text.configure(yscrollcommand=results_scrollbar.set)
         results_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        
-    def create_simple_tab(self):
-        simple_frame = ttk.Frame(self.notebook)
-        self.notebook.add(simple_frame, text="📁 Simple Organization")
-        
-        title_frame = ttk.Frame(simple_frame, style="Card.TFrame")
-        title_frame.pack(fill="x", padx=20, pady=(20, 10))
-        
-        title_label = ttk.Label(title_frame, 
-                               text="📁 Simple File Organization", 
-                               style="Title.TLabel")
-        title_label.pack(pady=20)
-        
-        quick_frame = ttk.LabelFrame(simple_frame, text="Quick Organization", padding="15")
-        quick_frame.pack(fill="x", padx=20, pady=(0, 10))
-        
-        folder_subframe = ttk.Frame(quick_frame)
-        folder_subframe.pack(fill="x", pady=(0, 15))
-        
-        ttk.Label(folder_subframe, text="Select folder:").pack(side="left", padx=(0, 10))
-        self.simple_folder_var = tk.StringVar()
-        folder_entry = ttk.Entry(folder_subframe, textvariable=self.simple_folder_var)
-        folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        
-        ttk.Button(folder_subframe, text="Browse", 
-                  command=self.browse_simple_folder).pack(side="left")
-        
-        action_subframe = ttk.Frame(quick_frame)
-        action_subframe.pack(fill="x")
-        
-        ttk.Button(action_subframe, text="📊 Organize by Type", 
-                  command=lambda: self.quick_organize(SortCriteria.TYPE)).pack(side="left", padx=(0, 10))
-        ttk.Button(action_subframe, text="📅 Organize by Date", 
-                  command=lambda: self.quick_organize(SortCriteria.DATE)).pack(side="left", padx=(0, 10))
-        ttk.Button(action_subframe, text="🎯 Smart Organize", 
-                  command=self.smart_organize).pack(side="left")
-        
-        log_frame = ttk.LabelFrame(simple_frame, text="Activity Log", padding="10")
-        log_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        
-        self.simple_log_text = tk.Text(log_frame, wrap=tk.WORD)
-        self.simple_log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        simple_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.simple_log_text.yview)
-        self.simple_log_text.configure(yscrollcommand=simple_scrollbar.set)
-        simple_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         
     def browse_source_folder(self):
         folder = filedialog.askdirectory(title="Select folder to organize")
@@ -270,7 +219,7 @@ class ReorgApp:
                     str(relative_path),
                     file_info.extension or "N/A",
                     format_size(file_info.size),
-                    file_info.modified_date.strftime("%Y-%m-%d"),
+                    file_info.modified.strftime("%Y-%m-%d"),
                     file_info.category.value
                 ))
             
@@ -319,7 +268,7 @@ class ReorgApp:
             messagebox.showwarning("Warning", "Please scan a folder first to get recommendations")
     
     def preview_organization(self):
-        if not self.intelligent_sorter.files_info:
+        if not self.intelligent_sorter.files:
             messagebox.showerror("Error", "Please scan a folder first")
             return
         
@@ -417,74 +366,6 @@ class ReorgApp:
         
         self.log_output("🧹 All data cleared")
     
-    def browse_simple_folder(self):
-        folder = filedialog.askdirectory(title="Select folder to organize")
-        if folder:
-            self.simple_folder_var.set(folder)
-    
-    def quick_organize(self, strategy: SortCriteria):
-        folder = self.simple_folder_var.get()
-        if not folder:
-            messagebox.showerror("Error", "Please select a folder first")
-            return
-        
-        try:
-            sorter = FileSorter()
-            files = sorter.scan_folder(folder)
-            
-            result = messagebox.askyesno(
-                "Confirm Organization",
-                f"Organize {len(files)} files in {folder} by {strategy.value.replace('_', ' ')}?"
-            )
-            
-            if result:
-                target = f"{folder}_organized"
-                plan = sorter.organize_files(target, strategy, dry_run=False)
-                total = sum(len(files) for files in plan.values())
-                
-                self.log_simple_message(f"✅ Organized {total} files by {strategy.value} in {target}")
-                messagebox.showinfo("Success", f"Organized {total} files!")
-            
-        except Exception as e:
-            error_msg = f"❌ Organization failed: {str(e)}"
-            self.log_simple_message(error_msg)
-            messagebox.showerror("Error", error_msg)
-    
-    def smart_organize(self):
-        folder = self.simple_folder_var.get()
-        if not folder:
-            messagebox.showerror("Error", "Please select a folder first")
-            return
-        
-        try:
-            sorter = FileSorter()
-            files = sorter.scan_folder(folder)
-            recommendation = sorter.recommend_strategy()
-            
-            strategy_name = recommendation['strategy'].value.replace('_', ' ')
-            result = messagebox.askyesno(
-                "Smart Organization",
-                f"Found {len(files)} files.\n\n"
-                f"Recommended strategy: {strategy_name}\n"
-                f"Reason: {recommendation['reason']}\n"
-                f"Confidence: {recommendation.get('confidence', 'N/A')}%\n\n"
-                f"Proceed with organization?"
-            )
-            
-            if result:
-                target = f"{folder}_organized"
-                plan = sorter.organize_files(target, recommendation['strategy'], 
-                                           dry_run=False)
-                total = sum(len(files) for files in plan.values())
-                
-                self.log_simple_message(f"✅ Smart organization complete! {total} files organized by {strategy_name}")
-                messagebox.showinfo("Success", f"Smart organization complete! {total} files organized!")
-            
-        except Exception as e:
-            error_msg = f"❌ Smart organization failed: {str(e)}"
-            self.log_simple_message(error_msg)
-            messagebox.showerror("Error", error_msg)
-    
     def log_output(self, message):
         current = self.results_text.get(1.0, tk.END)
         if current.strip():
@@ -492,13 +373,6 @@ class ReorgApp:
         else:
             self.results_text.insert(1.0, message)
         self.results_text.see(tk.END)
-        self.root.update()
-    
-    def log_simple_message(self, message):
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        formatted_message = f"[{timestamp}] {message}\n"
-        self.simple_log_text.insert(tk.END, formatted_message)
-        self.simple_log_text.see(tk.END)
         self.root.update()
         
     def run(self):

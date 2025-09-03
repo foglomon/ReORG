@@ -221,7 +221,6 @@ class SortCriteria(Enum):
     NAME = "file_name"
     EXTENSION = "file_extension"
     PROJECT = "project"
-    VERSION = "version_control"
 
 
 @dataclass
@@ -481,24 +480,12 @@ class FileSorter:
         total = len(self.files)
         categories = {}
         years = set()
-        versioned_files = sum(1 for f in self.files if f.is_versioned)
-        app_groups = {}
         
         for f in self.files:
             categories[f.category.value] = categories.get(f.category.value, 0) + 1
             years.add(f.year)
-            if f.is_versioned:
-                app_groups[f.app_name] = app_groups.get(f.app_name, 0) + 1
         
-        # Check if version control organization would be beneficial
-        if versioned_files >= 3 and versioned_files / total > 0.2:  # 20% or more are versioned
-            return {
-                "strategy": SortCriteria.VERSION,
-                "reason": f"Found {versioned_files} versioned files across {len(app_groups)} apps",
-                "confidence": 85
-            }
-        
-        # Simple heuristics for other strategies
+        # Simple heuristics for strategies
         if len(categories) > 3 and max(categories.values()) / total < 0.8:
             return {
                 "strategy": SortCriteria.TYPE,
@@ -527,29 +514,48 @@ class FileSorter:
         
         for file_info in self.files:
             if strategy == SortCriteria.TYPE:
+                base_folder = file_info.category.value
                 if file_info.is_versioned:
-                    # Group versioned files within their category
-                    dest_folder = f"{file_info.category.value}/{file_info.app_name}"
+                    # Automatically nest versioned files within their category
+                    dest_folder = f"{base_folder}/{file_info.app_name}"
                 else:
-                    dest_folder = file_info.category.value
-            elif strategy == SortCriteria.VERSION:
-                if file_info.is_versioned:
-                    # Primary version-based organization
-                    dest_folder = f"apps/{file_info.app_name}"
-                else:
-                    # Non-versioned files go to category folders
-                    dest_folder = f"unversioned/{file_info.category.value}"
+                    dest_folder = base_folder
             elif strategy == SortCriteria.DATE:
-                dest_folder = f"by_year/{file_info.year}"
+                base_folder = f"by_year/{file_info.year}"
+                if file_info.is_versioned:
+                    # Nest versioned files within date folders
+                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                else:
+                    dest_folder = base_folder
             elif strategy == SortCriteria.SIZE:
-                dest_folder = f"by_size/{file_info.size_category()}"
+                base_folder = f"by_size/{file_info.size_category()}"
+                if file_info.is_versioned:
+                    # Nest versioned files within size folders
+                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                else:
+                    dest_folder = base_folder
             elif strategy == SortCriteria.EXTENSION:
                 ext = file_info.extension[1:] if file_info.extension else "no_extension"
-                dest_folder = f"by_extension/{ext}"
+                base_folder = f"by_extension/{ext}"
+                if file_info.is_versioned:
+                    # Nest versioned files within extension folders
+                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                else:
+                    dest_folder = base_folder
             elif strategy == SortCriteria.PROJECT:
-                dest_folder = f"projects/{file_info.guess_project()}"
+                base_folder = f"projects/{file_info.guess_project()}"
+                if file_info.is_versioned:
+                    # Nest versioned files within project folders
+                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                else:
+                    dest_folder = base_folder
             else:
-                dest_folder = file_info.category.value
+                # Default to category-based organization
+                base_folder = file_info.category.value
+                if file_info.is_versioned:
+                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                else:
+                    dest_folder = base_folder
             
             if dest_folder not in plan:
                 plan[dest_folder] = []
