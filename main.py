@@ -132,16 +132,8 @@ class ReorgApp:
         ttk.Button(org_frame, text="Use Recommended", 
                   command=self.use_recommended_strategy).grid(row=0, column=2, padx=(0, 10))
         
-        ttk.Label(org_frame, text="Target folder:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=(10, 0))
-        self.target_folder_var = tk.StringVar()
-        target_entry = ttk.Entry(org_frame, textvariable=self.target_folder_var)
-        target_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(0, 10), pady=(10, 0))
-        
-        ttk.Button(org_frame, text="Browse", 
-                  command=self.browse_target_folder).grid(row=1, column=2, pady=(10, 0))
-        
         options_subframe = ttk.Frame(org_frame)
-        options_subframe.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10, 0))
+        options_subframe.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10, 0))
         
         self.dry_run_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(options_subframe, text="Dry run (preview only)", 
@@ -178,11 +170,6 @@ class ReorgApp:
         if folder:
             self.source_folder_var.set(folder)
             
-    def browse_target_folder(self):
-        folder = filedialog.askdirectory(title="Select target folder for organized files")
-        if folder:
-            self.target_folder_var.set(folder)
-    
     def create_test_files(self):
         folder = filedialog.askdirectory(title="Select folder for test files")
         if folder:
@@ -276,8 +263,7 @@ class ReorgApp:
             return
         
         try:
-            target_folder = self.target_folder_var.get() or "organized_files"
-            plan = self.intelligent_sorter.organize_files(target_folder, strategy, dry_run=True)
+            plan = self.intelligent_sorter.organize_files(strategy, dry_run=True)
             self.current_plan = plan
             
             summary = self.intelligent_sorter.get_summary(plan)
@@ -294,11 +280,6 @@ class ReorgApp:
             messagebox.showerror("Error", "Please generate a preview first")
             return
         
-        target_folder = self.target_folder_var.get()
-        if not target_folder:
-            messagebox.showerror("Error", "Please select a target folder")
-            return
-        
         strategy = self._get_selected_strategy()
         if not strategy:
             messagebox.showerror("Error", "Please select a sorting strategy")
@@ -306,16 +287,16 @@ class ReorgApp:
         
         if not self.dry_run_var.get():
             total_files = sum(len(files) for files in self.current_plan.values())
+            source_folder = self.source_folder_var.get()
             result = messagebox.askyesno(
                 "Confirm Organization", 
-                f"This will move {total_files} files to {target_folder}.\n\nAre you sure you want to proceed?"
+                f"This will organize {total_files} files within {source_folder}.\n\nAre you sure you want to proceed?"
             )
             if not result:
                 return
         
         try:
             plan = self.intelligent_sorter.organize_files(
-                target_folder, 
                 strategy, 
                 dry_run=self.dry_run_var.get()
             )
@@ -351,7 +332,6 @@ class ReorgApp:
             delattr(self, 'current_recommendation')
         
         self.source_folder_var.set("")
-        self.target_folder_var.set("")
         self.sort_strategy_var.set("")
         
         for item in self.file_tree.get_children():

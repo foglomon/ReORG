@@ -221,6 +221,7 @@ class SortCriteria(Enum):
     NAME = "file_name"
     EXTENSION = "file_extension"
     PROJECT = "project"
+    CUSTOM_REGEX = "custom_regex"
 
 
 @dataclass
@@ -307,6 +308,49 @@ class FileInfo:
         }.get(self.category, 'misc')
 
 
+@dataclass
+class CustomRegexRule:
+    """A custom rule for organizing files using regex patterns"""
+    name: str
+    pattern: str
+    folder_template: str
+    description: str = ""
+    case_sensitive: bool = False
+    
+    def matches(self, filename: str) -> Optional[Dict[str, str]]:
+        """Check if filename matches this rule and return capture groups"""
+        flags = 0 if self.case_sensitive else re.IGNORECASE
+        match = re.search(self.pattern, filename, flags)
+        if match:
+            # Return named groups and numbered groups
+            groups = match.groupdict()
+            # Add numbered groups as well
+            for i, group in enumerate(match.groups(), 1):
+                if group is not None:
+                    groups[f'group{i}'] = group
+            return groups
+        return None
+    
+    def generate_folder_path(self, groups: Dict[str, str], file_info: 'FileInfo') -> str:
+        """Generate the destination folder path using the template and captured groups"""
+        # Add file info variables that can be used in templates
+        template_vars = {
+            **groups,
+            'category': file_info.category.value,
+            'year': file_info.year,
+            'month': file_info.month_folder,
+            'size_category': file_info.size_category(),
+            'extension': file_info.extension[1:] if file_info.extension else 'no_extension',
+            'detected_ext': file_info.detected_ext or 'unknown'
+        }
+        
+        try:
+            return self.folder_template.format(**template_vars)
+        except KeyError as e:
+            # If template variable is missing, fall back to a safe default
+            return f"custom_regex/{self.name}/{groups.get('group1', 'unmatched')}"
+
+
 class FileSorter:
     """Main file organization class. Scans folders and sorts files intelligently."""
     
@@ -349,6 +393,7 @@ class FileSorter:
         
         self.files = []
         self.source_path = None
+        self.custom_regex_rules = []  # List of CustomRegexRule objects
     
     def _detect_version_info(self, file_path: Path) -> Tuple[Optional[str], Optional[str], bool]:
         """
@@ -508,6 +553,19 @@ class FileSorter:
             years.add(f.year)
         
         # Simple heuristics for strategies
+        
+        # If custom regex rules are defined, recommend using them
+        if self.custom_regex_rules:
+            matches = sum(1 for f in self.files 
+                         for rule in self.custom_regex_rules 
+                         if rule.matches(f.name))
+            if matches > total * 0.3:  # If >30% of files match custom rules
+                return {
+                    "strategy": SortCriteria.CUSTOM_REGEX,
+                    "reason": f"Custom regex rules match {matches}/{total} files",
+                    "confidence": 80
+                }
+        
         if len(categories) > 3 and max(categories.values()) / total < 0.8:
             return {
                 "strategy": SortCriteria.TYPE,
@@ -529,9 +587,101 @@ class FileSorter:
             "confidence": 60
         }
     
-    def organize_files(self, target_folder: Union[str, Path], strategy: SortCriteria, 
-                      dry_run: bool = True) -> Dict[str, List[str]]:
-        target_path = Path(target_folder)
+    def add_custom_regex_rule(self, rule: CustomRegexRule) -> None:
+        """Add a custom regex rule for file organization"""
+        self.custom_regex_rules.append(rule)
+    
+    def remove_custom_regex_rule(self, rule_name: str) -> bool:
+        """Remove a custom regex rule by name. Returns True if removed, False if not found"""
+        for i, rule in enumerate(self.custom_regex_rules):
+            if rule.name == rule_name:
+                del self.custom_regex_rules[i]
+                return True
+        return False
+    
+    def clear_custom_regex_rules(self) -> None:
+        """Remove all custom regex rules"""
+        self.custom_regex_rules.clear()
+    
+    def get_custom_regex_rules(self) -> List[CustomRegexRule]:
+        """Get a copy of all custom regex rules"""
+        return self.custom_regex_rules.copy()
+    
+    def _apply_custom_regex_rules(self, file_info: FileInfo) -> str:
+        """Apply custom regex rules to determine destination folder"""
+        filename = file_info.name
+        
+        # Try each rule in order until one matches
+        for rule in self.custom_regex_rules:
+            groups = rule.matches(filename)
+            if groups:
+                try:
+                    return rule.generate_folder_path(groups, file_info)
+                except Exception as e:
+                    # If rule fails, log it but continue to next rule
+                    print(f"Warning: Custom rule '{rule.name}' failed for '{filename}': {e}")
+                    continue
+        
+        # If no custom rules match, fall back to category-based organization
+        if file_info.is_versioned:
+            return f"custom_unmatched/{file_info.category.value}/{file_info.app_name}"
+        else:
+            return f"custom_unmatched/{file_info.category.value}"
+    
+    def validate_custom_regex_rule(self, rule: CustomRegexRule) -> List[str]:
+        """Validate a custom regex rule and return any errors found"""
+        errors = []
+        
+        # Test regex pattern
+        try:
+            re.compile(rule.pattern)
+        except re.error as e:
+            errors.append(f"Invalid regex pattern: {e}")
+        
+        # Test folder template with dummy data
+        try:
+            dummy_groups = {'group1': 'test', 'group2': 'example'}
+            dummy_file_info = FileInfo(
+                path=Path('test.txt'),
+                name='test.txt',
+                extension='.txt',
+                size=1024,
+                created=datetime.now(),
+                modified=datetime.now(),
+                category=FileCategory.DOCUMENT,
+                mime_type='text/plain',
+                is_hidden=False
+            )
+            rule.generate_folder_path(dummy_groups, dummy_file_info)
+        except Exception as e:
+            errors.append(f"Invalid folder template: {e}")
+        
+        return errors
+    
+    def test_custom_regex_rules(self) -> Dict[str, List[Tuple[str, str]]]:
+        """Test custom regex rules against current files and return matches"""
+        results = {}
+        
+        for rule in self.custom_regex_rules:
+            matches = []
+            for file_info in self.files:
+                groups = rule.matches(file_info.name)
+                if groups:
+                    try:
+                        dest_folder = rule.generate_folder_path(groups, file_info)
+                        matches.append((file_info.name, dest_folder))
+                    except Exception as e:
+                        matches.append((file_info.name, f"ERROR: {e}"))
+            
+            results[rule.name] = matches
+        
+        return results
+    
+    def organize_files(self, strategy: SortCriteria, dry_run: bool = True) -> Dict[str, List[str]]:
+        if not self.source_path:
+            raise ValueError("No source folder has been scanned. Call scan_folder() first.")
+        
+        target_path = self.source_path  # Organize within the same folder
         plan = {}
         
         for file_info in self.files:
@@ -570,6 +720,8 @@ class FileSorter:
                         dest_folder = f"projects/{project_name}"
                 else:
                     dest_folder = f"projects/{project_name}"
+            elif strategy == SortCriteria.CUSTOM_REGEX:
+                dest_folder = self._apply_custom_regex_rules(file_info)
             else:
                 # Default to category-based organization
                 if file_info.is_versioned:
@@ -637,6 +789,7 @@ class FileSorter:
     
     def _execute_plan(self, target_path: Path, plan: Dict[str, List[str]]):
         moved = 0
+        skipped = 0
         
         for dest_folder, file_paths in plan.items():
             dest_dir = target_path / dest_folder
@@ -645,6 +798,11 @@ class FileSorter:
             for file_path in file_paths:
                 source = Path(file_path)
                 destination = dest_dir / source.name
+                
+                # Skip if file is already in the correct location
+                if source.parent == dest_dir:
+                    skipped += 1
+                    continue
                 
                 # Handle name conflicts
                 counter = 1
@@ -660,7 +818,7 @@ class FileSorter:
                 except Exception as e:
                     print(f"Failed to move {source}: {e}")
         
-        print(f"Moved {moved} files")
+        print(f"Moved {moved} files" + (f", skipped {skipped} files already in correct location" if skipped > 0 else ""))
     
     def get_summary(self, plan: Dict[str, List[str]]) -> str:
         total = sum(len(files) for files in plan.values())
@@ -787,6 +945,144 @@ class FileSorter:
         return report
 
 
+def create_example_regex_rules() -> List[CustomRegexRule]:
+    """Create a set of example custom regex rules that users can use as templates"""
+    return [
+        CustomRegexRule(
+            name="Screenshots",
+            pattern=r"(?i)screenshot[_\s-]*(\d{4})[_\s-]*(\d{2})[_\s-]*(\d{2})",
+            folder_template="screenshots/{group1}/{group1}-{group2}",
+            description="Organize screenshots by year and month"
+        ),
+        CustomRegexRule(
+            name="Invoice Files",
+            pattern=r"(?i)invoice[_\s-]*(?P<company>\w+)[_\s-]*(?P<date>\d{4}[-_]\d{2}[-_]\d{2})",
+            folder_template="financial/invoices/{company}/{date}",
+            description="Organize invoices by company and date"
+        ),
+        CustomRegexRule(
+            name="Meeting Notes",
+            pattern=r"(?i)(?:meeting|notes?)[_\s-]*(?P<project>\w+)[_\s-]*(?P<date>\d{4}[-_]\d{2}[-_]\d{2})",
+            folder_template="meetings/{project}/{date}",
+            description="Organize meeting notes by project and date"
+        ),
+        CustomRegexRule(
+            name="Project Files",
+            pattern=r"(?P<project>[A-Za-z]+(?:\s+[A-Za-z]+)?)[_\s-]+(?P<type>design|spec|doc|final)",
+            folder_template="projects/{project}/{type}s",
+            description="Organize project files by project name and type"
+        ),
+        CustomRegexRule(
+            name="Backup Files",
+            pattern=r"(?i)backup[_\s-]*(?P<source>\w+)[_\s-]*(?P<date>\d{4}[-_]\d{2}[-_]\d{2})",
+            folder_template="backups/{source}/{date}",
+            description="Organize backup files by source and date"
+        ),
+        CustomRegexRule(
+            name="Photo Collections",
+            pattern=r"(?i)(?P<event>\w+(?:\s+\w+)?)[_\s-]*(?P<year>\d{4})[_\s-]*(?P<month>\d{2})",
+            folder_template="photos/{year}/{event}",
+            description="Organize photos by event and year"
+        ),
+        CustomRegexRule(
+            name="Code Archives",
+            pattern=r"(?P<project>\w+)[_\s-]*(?:v|version)[_\s-]*(?P<version>\d+(?:\.\d+)*)",
+            folder_template="code/{project}/v{version}",
+            description="Organize code archives by project and version"
+        ),
+        CustomRegexRule(
+            name="Client Work",
+            pattern=r"(?i)(?P<client>\w+)[_\s-]*(?P<type>proposal|contract|delivery|invoice)",
+            folder_template="clients/{client}/{type}s",
+            description="Organize client work by client name and document type"
+        ),
+        CustomRegexRule(
+            name="Year-Month Sort",
+            pattern=r"(?P<year>\d{4})[_\s-]*(?P<month>\d{2})",
+            folder_template="by_date/{year}/{year}-{month}",
+            description="Simple year-month based organization"
+        ),
+        CustomRegexRule(
+            name="File Types with Prefixes",
+            pattern=r"(?P<prefix>\w+)[_\s-]+.*\.(?P<ext>\w+)$",
+            folder_template="{category}/{prefix}",
+            description="Organize by file prefix within categories"
+        )
+    ]
+
+
+def create_custom_regex_rule_interactive() -> Optional[CustomRegexRule]:
+    """Interactive helper to create a custom regex rule with validation"""
+    print("\n" + "="*50)
+    print("CREATE CUSTOM REGEX RULE")
+    print("="*50)
+    
+    try:
+        name = input("Rule name: ").strip()
+        if not name:
+            print("Rule name cannot be empty")
+            return None
+        
+        print("\nRegex pattern (use named groups like (?P<name>pattern) for better templates):")
+        pattern = input("Pattern: ").strip()
+        if not pattern:
+            print("Pattern cannot be empty")
+            return None
+        
+        print("\nFolder template (use {group_name} or {group1}, {group2}, etc.):")
+        print("Available variables: {category}, {year}, {month}, {size_category}, {extension}, {detected_ext}")
+        folder_template = input("Template: ").strip()
+        if not folder_template:
+            print("Folder template cannot be empty")
+            return None
+        
+        description = input("Description (optional): ").strip()
+        
+        case_sensitive = input("Case sensitive? (y/N): ").strip().lower() == 'y'
+        
+        rule = CustomRegexRule(
+            name=name,
+            pattern=pattern,
+            folder_template=folder_template,
+            description=description,
+            case_sensitive=case_sensitive
+        )
+        
+        # Test the rule
+        print("\nTesting rule...")
+        test_filename = input("Enter a test filename (or press Enter to skip): ").strip()
+        if test_filename:
+            matches = rule.matches(test_filename)
+            if matches:
+                print(f"✓ Matches! Groups found: {matches}")
+                # Create a dummy FileInfo for template testing
+                dummy_file = FileInfo(
+                    path=Path(test_filename),
+                    name=test_filename,
+                    extension=Path(test_filename).suffix,
+                    size=1024,
+                    created=datetime.now(),
+                    modified=datetime.now(),
+                    category=FileCategory.OTHER,
+                    mime_type='text/plain',
+                    is_hidden=False
+                )
+                try:
+                    dest = rule.generate_folder_path(matches, dummy_file)
+                    print(f"✓ Would organize to: {dest}")
+                except Exception as e:
+                    print(f"✗ Template error: {e}")
+                    return None
+            else:
+                print("✗ No match found")
+        
+        return rule
+        
+    except KeyboardInterrupt:
+        print("\nCancelled")
+        return None
+
+
 def format_size(size_bytes: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size_bytes < 1024.0:
@@ -808,6 +1104,12 @@ def create_test_files(test_folder: Union[str, Path]):
         ("script.py", "#!/usr/bin/env python\nimport os\nprint('Hello')"),
         ("data.json", '{"name": "test", "value": 123}'),
         ("page.html", "<!DOCTYPE html><html><body>Hello</body></html>"),
+        # Custom regex test files
+        ("screenshot_2024_03_15.png", "fake screenshot"),
+        ("invoice_CompanyA_2024-03-10.pdf", "fake invoice"),
+        ("meeting_ProjectX_2024-03-12.docx", "fake meeting notes"),
+        ("backup_database_2024-03-08.sql", "fake backup"),
+        ("photo_vacation_2024_03.jpg", "fake photo"),
     ]
     
     # Misnamed files for testing detection
@@ -868,12 +1170,57 @@ if __name__ == "__main__":
     # Show version control detection
     print(sorter.version_control_report())
     
+    # Demonstrate custom regex rules
+    print("\n" + "="*50)
+    print("CUSTOM REGEX RULES DEMONSTRATION")
+    print("="*50)
+    
+    # Add some example rules
+    example_rules = create_example_regex_rules()
+    
+    # Add a rule specifically for our test files
+    custom_rule = CustomRegexRule(
+        name="Test Files",
+        pattern=r"(?P<type>script|data|page|report)",
+        folder_template="custom/{type}_files",
+        description="Custom rule for test files"
+    )
+    
+    sorter.add_custom_regex_rule(custom_rule)
+    
+    # Add a versioned files rule
+    version_rule = CustomRegexRule(
+        name="Version Control",
+        pattern=r"(?P<app>\w+)_v(?P<version>\d+\.\d+)",
+        folder_template="software/{app}/versions/v{version}",
+        description="Organize versioned software by app and version"
+    )
+    sorter.add_custom_regex_rule(version_rule)
+    
+    print(f"Added {len(sorter.get_custom_regex_rules())} custom rules")
+    
+    # Test the rules
+    test_results = sorter.test_custom_regex_rules()
+    for rule_name, matches in test_results.items():
+        if matches:
+            print(f"\nRule '{rule_name}' matches:")
+            for filename, dest in matches[:3]:  # Show first 3 matches
+                print(f"  {filename} → {dest}")
+            if len(matches) > 3:
+                print(f"  ... and {len(matches) - 3} more")
+    
     recommendation = sorter.recommend_strategy()
-    print(f"Recommended: {recommendation['strategy'].value}")
+    print(f"\nRecommended: {recommendation['strategy'].value}")
     print(f"Reason: {recommendation['reason']}")
     
-    plan = sorter.organize_files("organized", recommendation['strategy'])
-    print(f"\n{sorter.get_summary(plan)}")
+    # Try organizing with custom regex if rules match files
+    if recommendation['strategy'] == SortCriteria.CUSTOM_REGEX:
+        plan = sorter.organize_files(SortCriteria.CUSTOM_REGEX)
+        print(f"\nCustom Regex Organization Plan:")
+        print(sorter.get_summary(plan))
+    else:
+        plan = sorter.organize_files(recommendation['strategy'])
+        print(f"\n{sorter.get_summary(plan)}")
     
     stats = sorter.get_stats()
     print("Statistics:")
@@ -884,3 +1231,13 @@ if __name__ == "__main__":
     print(f"Versioned files: {stats['versioned_files']}")
     if stats['app_groups']:
         print(f"App groups: {list(stats['app_groups'].keys())}")
+    
+    # Show example rules that users can use
+    print("\n" + "="*50)
+    print("EXAMPLE REGEX RULES")
+    print("="*50)
+    print("Here are some example custom regex rules you can use:")
+    for rule in example_rules[:5]:  # Show first 5 examples
+        print(f"\n• {rule.name}: {rule.description}")
+        print(f"  Pattern: {rule.pattern}")
+        print(f"  Template: {rule.folder_template}")
