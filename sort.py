@@ -182,7 +182,7 @@ class FileSignatureDetector:
                     return 'py', 'text/x-python'
                 elif 'bash' in content[:100] or 'sh' in content[:100]:
                     return 'sh', 'text/x-shellscript'
-                return 'script', 'text/plain'
+                return 'py', 'text/x-python'  # Default script to python for simplicity
             
             if '<!doctype html' in content or '<html' in content:
                 return 'html', 'text/html'
@@ -264,7 +264,7 @@ class FileInfo:
         path_parts = self.path.parts
         name_lower = self.name.lower()
         
-        # Try common filename patterns first
+        # Try common filename patterns first - but be more conservative
         patterns = [
             r'project[_-]?(\w+)',
             r'(\w+)[_-]project', 
@@ -277,10 +277,10 @@ class FileInfo:
             if match and match.group(1) not in ['file', 'new', 'temp', 'test']:
                 return match.group(1)
         
-        # Check for content keywords
+        # Check for content keywords - but avoid overly broad matching
         keywords = {
             'meeting': 'meetings', 'report': 'reports', 'invoice': 'financial',
-            'photo': 'photos', 'music': 'audio', 'backup': 'backups'
+            'backup': 'backups'
         }
         
         for keyword, folder in keywords.items():
@@ -291,7 +291,7 @@ class FileInfo:
         if len(path_parts) > 1:
             parent = path_parts[-2].lower()
             generic = {'desktop', 'downloads', 'documents', 'pictures', 'videos', 
-                      'music', 'temp', 'test', 'new folder'}
+                      'music', 'temp', 'test', 'new folder', 'projects'}
             if parent not in generic and len(parent) > 2:
                 return parent.replace('_', ' ').replace('-', ' ')
         
@@ -339,11 +339,12 @@ class FileSorter:
             # Code
             '.py': FileCategory.CODE, '.js': FileCategory.CODE, '.html': FileCategory.CODE,
             '.css': FileCategory.CODE, '.java': FileCategory.CODE, '.cpp': FileCategory.CODE,
-            '.c': FileCategory.CODE, '.php': FileCategory.CODE,
+            '.c': FileCategory.CODE, '.php': FileCategory.CODE, '.json': FileCategory.CODE,
+            '.xml': FileCategory.CODE, '.yml': FileCategory.CODE, '.yaml': FileCategory.CODE,
+            '.sh': FileCategory.CODE, '.script': FileCategory.CODE,
             
             # Data
-            '.json': FileCategory.DATA, '.xml': FileCategory.DATA, '.csv': FileCategory.DATA,
-            '.sql': FileCategory.DATA, '.yml': FileCategory.DATA,
+            '.csv': FileCategory.DATA, '.sql': FileCategory.DATA, '.db': FileCategory.DATA,
         }
         
         self.files = []
@@ -436,7 +437,12 @@ class FileSorter:
         is_misnamed = False
         if detected_ext:
             if extension and extension != f".{detected_ext}":
-                is_misnamed = True
+                # Only consider it misnamed if the detected type is very different
+                ext_category = self.ext_to_category.get(extension, FileCategory.OTHER)
+                detected_category = self.ext_to_category.get(f".{detected_ext}", FileCategory.OTHER)
+                # If both categories are the same, don't consider it misnamed
+                if ext_category != detected_category:
+                    is_misnamed = True
             elif not extension:  # no extension but we detected one
                 is_misnamed = True
         
@@ -444,11 +450,27 @@ class FileSorter:
         final_ext = f".{detected_ext}" if detected_ext else extension
         category = self.ext_to_category.get(final_ext, FileCategory.OTHER)
         
-        # Prefer detected info when we're confident about it
-        if detected_ext and is_misnamed:
+        # Always prioritize the file extension over content detection
+        # This prevents files like song.doc from being categorized as audio
+        if extension:
+            category = self.ext_to_category.get(extension, FileCategory.OTHER)
+        
+        # Only use content detection for files without extensions
+        if not extension and detected_ext:
             detected_cat = self.ext_to_category.get(f".{detected_ext}", FileCategory.OTHER)
             if detected_cat != FileCategory.OTHER:
                 category = detected_cat
+        
+        # For clearly misnamed files, be very conservative about overriding
+        # Only override if the file has no meaningful extension
+        elif is_misnamed and detected_ext and extension:
+            ext_category = self.ext_to_category.get(extension, FileCategory.OTHER)
+            detected_category = self.ext_to_category.get(f".{detected_ext}", FileCategory.OTHER)
+            
+            # Only override if original extension gives us "OTHER" category
+            # This preserves document files even if they have embedded media content
+            if ext_category == FileCategory.OTHER:
+                category = detected_category
         
         mime_type = detected_mime or mimetypes.guess_type(str(file_path))[0]
         
@@ -514,57 +536,104 @@ class FileSorter:
         
         for file_info in self.files:
             if strategy == SortCriteria.TYPE:
-                base_folder = file_info.category.value
                 if file_info.is_versioned:
-                    # Automatically nest versioned files within their category
-                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                    # Group versioned files under their app name within category
+                    dest_folder = f"{file_info.category.value}/{file_info.app_name}"
                 else:
-                    dest_folder = base_folder
+                    dest_folder = file_info.category.value
             elif strategy == SortCriteria.DATE:
-                base_folder = f"by_year/{file_info.year}"
                 if file_info.is_versioned:
-                    # Nest versioned files within date folders
-                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                    # Group versioned files under their app name within date folders
+                    dest_folder = f"by_year/{file_info.year}/{file_info.app_name}"
                 else:
-                    dest_folder = base_folder
+                    dest_folder = f"by_year/{file_info.year}"
             elif strategy == SortCriteria.SIZE:
-                base_folder = f"by_size/{file_info.size_category()}"
                 if file_info.is_versioned:
-                    # Nest versioned files within size folders
-                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                    # Group versioned files under their app name within size folders
+                    dest_folder = f"by_size/{file_info.size_category()}/{file_info.app_name}"
                 else:
-                    dest_folder = base_folder
+                    dest_folder = f"by_size/{file_info.size_category()}"
             elif strategy == SortCriteria.EXTENSION:
                 ext = file_info.extension[1:] if file_info.extension else "no_extension"
-                base_folder = f"by_extension/{ext}"
                 if file_info.is_versioned:
-                    # Nest versioned files within extension folders
-                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                    # Group versioned files under their app name within extension folders
+                    dest_folder = f"by_extension/{ext}/{file_info.app_name}"
                 else:
-                    dest_folder = base_folder
+                    dest_folder = f"by_extension/{ext}"
             elif strategy == SortCriteria.PROJECT:
-                base_folder = f"projects/{file_info.guess_project()}"
+                project_name = file_info.guess_project()
                 if file_info.is_versioned:
-                    # Nest versioned files within project folders
-                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                    # For versioned files, use app name as project if it's different from guessed project
+                    if file_info.app_name.lower() != project_name.lower():
+                        dest_folder = f"projects/{file_info.app_name}"
+                    else:
+                        dest_folder = f"projects/{project_name}"
                 else:
-                    dest_folder = base_folder
+                    dest_folder = f"projects/{project_name}"
             else:
                 # Default to category-based organization
-                base_folder = file_info.category.value
                 if file_info.is_versioned:
-                    dest_folder = f"{base_folder}/{file_info.app_name}"
+                    dest_folder = f"{file_info.category.value}/{file_info.app_name}"
                 else:
-                    dest_folder = base_folder
+                    dest_folder = file_info.category.value
             
             if dest_folder not in plan:
                 plan[dest_folder] = []
             plan[dest_folder].append(str(file_info.path))
         
+        # Post-process: move beta/alpha versions under their main app folder if it exists
+        plan = self._consolidate_beta_versions(plan)
+        
         if not dry_run:
             self._execute_plan(target_path, plan)
         
         return plan
+    
+    def _consolidate_beta_versions(self, plan: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        """
+        Move beta/alpha versions under their main app folder if it exists.
+        For example, if both 'tool' and 'tool beta' folders exist, move 'tool beta' under 'tool'.
+        """
+        new_plan = {}
+        folders_to_remove = set()
+        
+        # First, identify potential beta/alpha folders and their main counterparts
+        beta_mappings = {}
+        
+        for folder_path in plan.keys():
+            folder_parts = folder_path.split('/')
+            if len(folder_parts) >= 2:  # category/app_name
+                category = folder_parts[0]
+                app_name = folder_parts[-1].lower()  # Get the last part (app name)
+                
+                # Check if this looks like a beta/alpha version
+                beta_indicators = ['beta', 'alpha', 'rc', 'dev', 'test', 'preview']
+                for indicator in beta_indicators:
+                    if indicator in app_name:
+                        # Extract the base app name (remove beta/alpha part)
+                        base_name = app_name.replace(f' {indicator}', '').replace(f'_{indicator}', '').replace(f'-{indicator}', '').replace(indicator, '').strip()
+                        
+                        # Look for the main app folder in the same category
+                        main_folder = f"{category}/{base_name}"
+                        if main_folder in plan:
+                            # Found the main folder, plan to move beta under it
+                            beta_folder_name = folder_parts[-1]  # Keep original case
+                            new_beta_path = f"{main_folder}/{beta_folder_name}"
+                            beta_mappings[folder_path] = new_beta_path
+                            folders_to_remove.add(folder_path)
+                            break
+        
+        # Copy all folders to new plan, applying beta mappings
+        for folder_path, files in plan.items():
+            if folder_path in beta_mappings:
+                # This is a beta folder that should be moved
+                new_path = beta_mappings[folder_path]
+                new_plan[new_path] = files
+            elif folder_path not in folders_to_remove:
+                # This is a regular folder (including main app folders)
+                new_plan[folder_path] = files
+        
+        return new_plan
     
     def _execute_plan(self, target_path: Path, plan: Dict[str, List[str]]):
         moved = 0

@@ -125,7 +125,7 @@ class ReorgApp:
         strategy_combo = ttk.Combobox(org_frame, textvariable=self.sort_strategy_var, 
                                     values=[
                                         "File Type", "Date (Year)", "Date (Month)", 
-                                        "File Size", "Project/Topic", "File Extension", "Version Control"
+                                        "File Size", "Project/Topic", "File Extension"
                                     ], state="readonly")
         strategy_combo.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
         
@@ -255,11 +255,9 @@ class ReorgApp:
             strategy_map = {
                 SortCriteria.TYPE: "File Type",
                 SortCriteria.DATE: "Date (Year)",
-                SortCriteria.MONTH: "Date (Month)",
                 SortCriteria.SIZE: "File Size",
                 SortCriteria.PROJECT: "Project/Topic",
-                SortCriteria.EXTENSION: "File Extension",
-                SortCriteria.VERSION: "Version Control"
+                SortCriteria.EXTENSION: "File Extension"
             }
             
             recommended = strategy_map.get(self.current_recommendation['strategy'], "File Type")
@@ -340,8 +338,7 @@ class ReorgApp:
             "Date (Month)": SortCriteria.DATE,
             "File Size": SortCriteria.SIZE,
             "Project/Topic": SortCriteria.PROJECT,
-            "File Extension": SortCriteria.EXTENSION,
-            "Version Control": SortCriteria.VERSION
+            "File Extension": SortCriteria.EXTENSION
         }
         
         selected = self.sort_strategy_var.get()
