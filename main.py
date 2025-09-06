@@ -194,7 +194,7 @@ class ReorgApp:
             self.log_output("🔍 Scanning folder...")
             self.root.update()
             
-            files = self.intelligent_sorter.scan_folder(source_folder)
+            files = self.intelligent_sorter.scan(source_folder)
             
             for item in self.file_tree.get_children():
                 self.file_tree.delete(item)
@@ -219,7 +219,7 @@ class ReorgApp:
             self.stats_text.delete(1.0, tk.END)
             self.stats_text.insert(1.0, stats_text)
             
-            recommendation = self.intelligent_sorter.recommend_strategy()
+            recommendation = self.intelligent_sorter.recommend()
             rec_text = f"🎯 Smart Recommendation:\n"
             rec_text += f"Strategy: {recommendation['strategy'].value}\n"
             rec_text += f"Reason: {recommendation['reason']}\n"
@@ -361,11 +361,12 @@ def main():
         app = ReorgApp()
         app.run()
     except ImportError as e:
-        print(f"Error: Missing required module - {e}")
-        print("Make sure all dependencies are installed")
+        import tkinter.messagebox as messagebox
+        messagebox.showerror("Import Error", f"Missing required module: {e}\nMake sure all dependencies are installed")
         return 1
     except Exception as e:
-        print(f"Error starting application: {e}")
+        import tkinter.messagebox as messagebox
+        messagebox.showerror("Application Error", f"Error starting application: {e}")
         return 1
         
     return 0

@@ -1,18 +1,9 @@
-
-#!/usr/bin/env python3
-"""
-File organization tool with content-aware detection.
-
-Sorts files by analyzing their actual content (magic bytes) rather than just
-trusting extensions. Useful for cleaning up downloads folders and organizing
-misnamed files.
-"""
-
 import os
 import re
 import shutil
 import mimetypes
 import zipfile
+import json
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Union
@@ -20,33 +11,23 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-class FileSignatureDetector:
-    """Detects actual file types by reading magic bytes instead of trusting extensions"""
-    
+class FileDetector:
     def __init__(self):
-        # Common file signatures - organized by frequency in typical use
-        self.signatures = {
-            # Images (most common downloads)
+        self.sigs = {
             b'\xFF\xD8\xFF': ('jpg', 'image/jpeg'),
             b'\x89PNG\r\n\x1a\n': ('png', 'image/png'),
             b'GIF87a': ('gif', 'image/gif'),
             b'GIF89a': ('gif', 'image/gif'),
             b'BM': ('bmp', 'image/bmp'),
-            b'RIFF': ('webp', 'image/webp'),  # needs secondary check
+            b'RIFF': ('webp', 'image/webp'),
             b'\x00\x00\x01\x00': ('ico', 'image/x-icon'),
-            
-            # Documents
             b'%PDF': ('pdf', 'application/pdf'),
-            b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1': ('doc', 'application/msword'),  # old office
-            b'PK\x03\x04': ('zip', 'application/zip'),  # also new office formats
-            
-            # Archives
+            b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1': ('doc', 'application/msword'),
+            b'PK\x03\x04': ('zip', 'application/zip'),
             b'Rar!\x1a\x07\x00': ('rar', 'application/x-rar-compressed'),
             b'7z\xBC\xAF\x27\x1C': ('7z', 'application/x-7z-compressed'),
             b'\x1f\x8b': ('gz', 'application/gzip'),
             b'BZh': ('bz2', 'application/x-bzip2'),
-            
-            # Media files  
             b'\x00\x00\x00\x14ftypqt': ('mov', 'video/quicktime'),
             b'\x00\x00\x00\x18ftypmp4': ('mp4', 'video/mp4'),
             b'\x1aE\xdf\xa3': ('mkv', 'video/x-matroska'),
@@ -55,91 +36,77 @@ class FileSignatureDetector:
             b'\xff\xfb': ('mp3', 'audio/mpeg'),
             b'fLaC': ('flac', 'audio/flac'),
             b'OggS': ('ogg', 'audio/ogg'),
-            
-            # Executables
             b'MZ': ('exe', 'application/x-msdownload'),
             b'\x7fELF': ('elf', 'application/x-executable'),
-            
-            # Scripts/code
             b'#!/': ('script', 'text/plain'),
             b'<?xml': ('xml', 'application/xml'),
             b'\xef\xbb\xbf': ('utf8_bom', 'text/plain'),
         }
         
-        # Files that need a second look after initial signature match
-        self.ambiguous_signatures = {
-            b'RIFF': self._identify_riff_file,
-            b'PK\x03\x04': self._identify_zip_file,
-            b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1': self._identify_ole_file,
+        self.special = {
+            b'RIFF': self.check_riff,
+            b'PK\x03\x04': self.check_zip,
+            b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1': self.check_ole,
         }
     
-    def detect_file_type(self, file_path: Path) -> Tuple[Optional[str], Optional[str]]:
+    def detect_type(self, file_path: Path) -> Tuple[Optional[str], Optional[str]]:
         try:
             with open(file_path, 'rb') as f:
-                header = f.read(64)  # should be enough for most signatures
+                data = f.read(64)
                 
-            if not header:
+            if not data:
                 return None, None
             
-            # Check signatures in order of likelihood
-            for signature, (ext, mime) in self.signatures.items():
-                if header.startswith(signature):
-                    # Some signatures need disambiguation
-                    if signature in self.ambiguous_signatures:
-                        result = self.ambiguous_signatures[signature](header, file_path)
+            for sig, (ext, mime) in self.sigs.items():
+                if data.startswith(sig):
+                    if sig in self.special:
+                        result = self.special[sig](data, file_path)
                         if result:
                             return result
                     return ext, mime
             
-            # Fallback to text analysis for unrecognized files
-            if self._looks_like_text(header):
-                return self._guess_text_type(file_path, header)
+            if self.is_text(data):
+                return self.guess_text(file_path, data)
                 
             return None, None
             
-        except (IOError, OSError, PermissionError):
-            # File access issues - just give up gracefully
+        except:
             return None, None
     
-    def _identify_riff_file(self, header: bytes, file_path: Path) -> Optional[Tuple[str, str]]:
-        # RIFF files have format identifier at offset 8
-        if len(header) >= 12:
-            format_type = header[8:12]
-            if format_type == b'WAVE':
+    def check_riff(self, data: bytes, file_path: Path) -> Optional[Tuple[str, str]]:
+        if len(data) >= 12:
+            fmt = data[8:12]
+            if fmt == b'WAVE':
                 return 'wav', 'audio/wav'
-            elif format_type == b'AVI ':
+            elif fmt == b'AVI ':
                 return 'avi', 'video/x-msvideo'
-            elif format_type == b'WEBP':
+            elif fmt == b'WEBP':
                 return 'webp', 'image/webp'
         return None
     
-    def _identify_zip_file(self, header: bytes, file_path: Path) -> Optional[Tuple[str, str]]:
-        # Modern office docs are just zip files with specific structure
+    def check_zip(self, data: bytes, file_path: Path) -> Optional[Tuple[str, str]]:
         try:
             with zipfile.ZipFile(file_path, 'r') as zf:
-                filenames = zf.namelist()
+                files = zf.namelist()
                 
-                # Check for office document patterns
-                if 'word/document.xml' in filenames:
+                if 'word/document.xml' in files:
                     return 'docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                elif 'xl/workbook.xml' in filenames:
+                elif 'xl/workbook.xml' in files:
                     return 'xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                elif 'ppt/presentation.xml' in filenames:
+                elif 'ppt/presentation.xml' in files:
                     return 'pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-                elif 'META-INF/manifest.xml' in filenames:
+                elif 'META-INF/manifest.xml' in files:
                     return 'odt', 'application/vnd.oasis.opendocument.text'
                 
-        except (zipfile.BadZipFile, IOError):
+        except:
             pass
         
         return 'zip', 'application/zip'
     
-    def _identify_ole_file(self, header: bytes, file_path: Path) -> Optional[Tuple[str, str]]:
-        # Old office formats - this is a simplified check
-        # Real OLE parsing would be overkill for our use case
+    def check_ole(self, data: bytes, file_path: Path) -> Optional[Tuple[str, str]]:
         try:
             with open(file_path, 'rb') as f:
-                content = f.read(2048)  # read a bit more to find identifying strings
+                content = f.read(2048)
             
             if b'Microsoft Office Word' in content or b'Word.Document' in content:
                 return 'doc', 'application/msword'
@@ -148,41 +115,39 @@ class FileSignatureDetector:
             elif b'Microsoft Office PowerPoint' in content:
                 return 'ppt', 'application/vnd.ms-powerpoint'
                 
-        except (IOError, OSError):
+        except:
             pass
         
-        # Default assumption for OLE files
         return 'doc', 'application/msword'
     
-    def _looks_like_text(self, header: bytes) -> bool:
-        if not header:
+    def is_text(self, data: bytes) -> bool:
+        if not data:
             return False
         
-        # UTF-8 BOM is a dead giveaway
-        if header.startswith(b'\xef\xbb\xbf'):
+        if data.startswith(b'\xef\xbb\xbf'):
             return True
         
-        # Count how many bytes look like printable text
         try:
-            header.decode('utf-8')
-            printable = sum(1 for b in header if 32 <= b <= 126 or b in [9, 10, 13])
-            return printable / len(header) > 0.7
-        except UnicodeDecodeError:
+            data.decode('utf-8')
+            count = 0
+            for b in data:
+                if 32 <= b <= 126 or b in [9, 10, 13]:
+                    count += 1
+            return count / len(data) > 0.7
+        except:
             return False
     
-    def _guess_text_type(self, file_path: Path, header: bytes) -> Tuple[str, str]:
-        # For text files, we need to peek at more content
+    def guess_text(self, file_path: Path, data: bytes) -> Tuple[str, str]:
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read(1024).lower()
             
-            # Check for common patterns
             if content.startswith('#!/'):
                 if 'python' in content[:100]:
                     return 'py', 'text/x-python'
                 elif 'bash' in content[:100] or 'sh' in content[:100]:
                     return 'sh', 'text/x-shellscript'
-                return 'py', 'text/x-python'  # Default script to python for simplicity
+                return 'py', 'text/x-python'
             
             if '<!doctype html' in content or '<html' in content:
                 return 'html', 'text/html'
@@ -197,13 +162,13 @@ class FileSignatureDetector:
             elif '#include' in content and 'main(' in content:
                 return 'c', 'text/x-c'
                 
-        except (IOError, UnicodeDecodeError):
+        except:
             pass
         
         return 'txt', 'text/plain'
 
 
-class FileCategory(Enum):
+class FileCat(Enum):
     IMAGE = "images"
     DOCUMENT = "documents"
     VIDEO = "videos"
@@ -214,7 +179,7 @@ class FileCategory(Enum):
     OTHER = "other"
 
 
-class SortCriteria(Enum):
+class SortBy(Enum):
     TYPE = "file_type"
     DATE = "date"
     SIZE = "file_size"
@@ -225,23 +190,46 @@ class SortCriteria(Enum):
 
 
 @dataclass
-class FileInfo:
+class BkpEntry:
+    orig: str
+    curr: str
+    name: str
+    size: int
+    mod: str
+    checksum: Optional[str] = None
+
+
+@dataclass
+class Backup:
+    time: str
+    dir: str
+    strat: str
+    total: int
+    ver: str = "1.0"
+    entries: List[BkpEntry] = None
+    
+    def __post_init__(self):
+        if self.entries is None:
+            self.entries = []
+
+
+@dataclass
+class FileData:
     path: Path
     name: str
-    extension: str
+    ext: str
     size: int
     created: datetime
     modified: datetime
-    category: FileCategory
-    mime_type: Optional[str]
-    is_hidden: bool
-    detected_ext: Optional[str] = None
-    detected_mime: Optional[str] = None
-    is_misnamed: bool = False
-    # Version control fields
-    app_name: Optional[str] = None
-    version: Optional[str] = None
-    is_versioned: bool = False
+    cat: FileCat
+    mime: Optional[str]
+    hidden: bool
+    det_ext: Optional[str] = None
+    det_mime: Optional[str] = None
+    wrong: bool = False
+    app: Optional[str] = None
+    ver: Optional[str] = None
+    versioned: bool = False
     
     @property
     def year(self) -> str:
@@ -251,21 +239,20 @@ class FileInfo:
     def month_folder(self) -> str:
         return f"{self.modified.year}-{self.modified.month:02d}"
     
-    def size_category(self) -> str:
-        if self.size < 1024 * 1024:  # < 1MB
+    def size_cat(self) -> str:
+        if self.size < 1024 * 1024:
             return "small"
-        elif self.size < 50 * 1024 * 1024:  # < 50MB
+        elif self.size < 50 * 1024 * 1024:
             return "medium"
-        elif self.size < 500 * 1024 * 1024:  # < 500MB
+        elif self.size < 500 * 1024 * 1024:
             return "large"
         else:
             return "huge"
     
-    def guess_project(self) -> str:
-        path_parts = self.path.parts
-        name_lower = self.name.lower()
+    def guess_proj(self) -> str:
+        parts = self.path.parts
+        name = self.name.lower()
         
-        # Try common filename patterns first - but be more conservative
         patterns = [
             r'project[_-]?(\w+)',
             r'(\w+)[_-]project', 
@@ -273,44 +260,136 @@ class FileInfo:
             r'(\w+)[_-](final|draft|report)'
         ]
         
-        for pattern in patterns:
-            match = re.search(pattern, name_lower)
+        for p in patterns:
+            match = re.search(p, name)
             if match and match.group(1) not in ['file', 'new', 'temp', 'test']:
                 return match.group(1)
         
-        # Check for content keywords - but avoid overly broad matching
         keywords = {
             'meeting': 'meetings', 'report': 'reports', 'invoice': 'financial',
             'backup': 'backups'
         }
         
-        for keyword, folder in keywords.items():
-            if keyword in name_lower:
+        for k, folder in keywords.items():
+            if k in name:
                 return folder
         
-        # Use parent folder if it's not generic
-        if len(path_parts) > 1:
-            parent = path_parts[-2].lower()
-            generic = {'desktop', 'downloads', 'documents', 'pictures', 'videos', 
-                      'music', 'temp', 'test', 'new folder', 'projects'}
-            if parent not in generic and len(parent) > 2:
-                return parent.replace('_', ' ').replace('-', ' ')
+        return self.analyze_folders()
+    
+    def analyze_folders(self) -> str:
+        path_parts = self.path.parts
         
-        # Fallback to file category
-        return {
-            FileCategory.IMAGE: 'images',
-            FileCategory.DOCUMENT: 'documents', 
-            FileCategory.VIDEO: 'videos',
-            FileCategory.AUDIO: 'audio',
-            FileCategory.CODE: 'code',
-            FileCategory.ARCHIVE: 'archives',
-            FileCategory.DATA: 'data'
-        }.get(self.category, 'misc')
+        learned_patterns = {}
+        if hasattr(self, '_parent_sorter') and self._parent_sorter:
+            learned_patterns = self._parent_sorter.analyze_existing_organization()
+        
+        sys_dirs = {
+            'users', 'user', 'home', 'documents', 'desktop', 'downloads', 'pictures', 
+            'videos', 'music', 'appdata', 'program files', 'windows', 'system32',
+            'applications', 'library', 'volumes', 'mnt', 'usr', 'bin', 'etc', 'var'
+        }
+        
+        temp_dirs = {
+            'temp', 'tmp', 'cache', 'backup', 'recycle', 'trash', 'archive',
+            'old', 'new', 'copy', 'duplicate', 'test', 'sample'
+        }
+        
+        candidates = []
+        for i, part in enumerate(path_parts[:-1]):
+            folder_name = part.lower()
+            clean_name = part
+            
+            if len(folder_name) <= 2:
+                continue
+                
+            if folder_name in sys_dirs:
+                continue
+                
+            score = self.calc_score(folder_name, i, len(path_parts))
+            
+            if folder_name in learned_patterns:
+                score += learned_patterns[folder_name] * 2.0
+            
+            if score > 0:
+                candidates.append({
+                    'name': clean_name,
+                    'score': score,
+                    'depth': i,
+                    'folder': folder_name,
+                    'learned': folder_name in learned_patterns
+                })
+        
+        if not candidates:
+            return {
+                FileCat.IMAGE: 'images',
+                FileCat.DOCUMENT: 'documents', 
+                FileCat.VIDEO: 'videos',
+                FileCat.AUDIO: 'audio',
+                FileCat.CODE: 'code',
+                FileCat.ARCHIVE: 'archives',
+                FileCat.DATA: 'data'
+            }.get(self.cat, 'misc')
+        
+        learned_candidates = [c for c in candidates if c.get('learned', False)]
+        if learned_candidates:
+            best = max(learned_candidates, key=lambda x: x['score'])
+        else:
+            best = max(candidates, key=lambda x: x['score'])
+            
+        return best['name'].replace('_', ' ').replace('-', ' ')
+    
+    def calc_score(self, folder_name: str, depth: int, total_depth: int) -> float:
+        score = 0.0
+        
+        distance_from_file = (total_depth - depth - 2)
+        if distance_from_file >= 0:
+            score += 1.0 / (1 + distance_from_file * 0.3)
+        
+        positive_patterns = [
+            (r'project', 2.0),
+            (r'work', 1.5),
+            (r'dev', 1.5),
+            (r'code', 1.5),
+            (r'app', 1.2),
+            (r'src', 1.2),
+            (r'source', 1.2),
+            (r'\d{4}', 1.0),
+            (r'v\d+', 0.8),
+            (r'[A-Z][a-z]+[A-Z]', 1.0),
+        ]
+        
+        for pattern, weight in positive_patterns:
+            if re.search(pattern, folder_name, re.IGNORECASE):
+                score += weight
+        
+        negative_patterns = [
+            (r'^(temp|tmp|cache|backup|old|new|copy|test|sample)$', -3.0),
+            (r'^(bin|lib|node_modules|__pycache__|\.git|\.vscode)$', -2.0),
+            (r'^(misc|other|random|stuff|files|data)$', -1.5),
+            (r'^\d+$', -1.0),
+            (r'^[a-z]{1,3}$', -0.5),
+        ]
+        
+        for pattern, weight in negative_patterns:
+            if re.search(pattern, folder_name, re.IGNORECASE):
+                score += weight
+        
+        if 4 <= len(folder_name) <= 20:
+            score += 0.5
+        elif len(folder_name) > 20:
+            score -= 0.3
+        
+        if re.search(r'[A-Z]', folder_name) and re.search(r'[a-z]', folder_name):
+            score += 0.3
+        
+        if re.search(r'[_-]', folder_name) and not re.search(r'^[_-]|[_-]$', folder_name):
+            score += 0.2
+        
+        return score
 
 
 @dataclass
 class CustomRegexRule:
-    """A custom rule for organizing files using regex patterns"""
     name: str
     pattern: str
     folder_template: str
@@ -318,132 +397,98 @@ class CustomRegexRule:
     case_sensitive: bool = False
     
     def matches(self, filename: str) -> Optional[Dict[str, str]]:
-        """Check if filename matches this rule and return capture groups"""
         flags = 0 if self.case_sensitive else re.IGNORECASE
         match = re.search(self.pattern, filename, flags)
         if match:
-            # Return named groups and numbered groups
             groups = match.groupdict()
-            # Add numbered groups as well
             for i, group in enumerate(match.groups(), 1):
                 if group is not None:
                     groups[f'group{i}'] = group
             return groups
         return None
     
-    def generate_folder_path(self, groups: Dict[str, str], file_info: 'FileInfo') -> str:
-        """Generate the destination folder path using the template and captured groups"""
-        # Add file info variables that can be used in templates
+    def generate_folder_path(self, groups: Dict[str, str], file_info: 'FileData') -> str:
         template_vars = {
             **groups,
-            'category': file_info.category.value,
+            'category': file_info.cat.value,
             'year': file_info.year,
             'month': file_info.month_folder,
-            'size_category': file_info.size_category(),
-            'extension': file_info.extension[1:] if file_info.extension else 'no_extension',
-            'detected_ext': file_info.detected_ext or 'unknown'
+            'size_category': file_info.size_cat(),
+            'extension': file_info.ext[1:] if file_info.ext else 'no_extension',
+            'detected_ext': file_info.det_ext or 'unknown'
         }
         
         try:
             return self.folder_template.format(**template_vars)
         except KeyError as e:
-            # If template variable is missing, fall back to a safe default
             return f"custom_regex/{self.name}/{groups.get('group1', 'unmatched')}"
 
 
 class FileSorter:
-    """Main file organization class. Scans folders and sorts files intelligently."""
     
     def __init__(self):
-        self.detector = FileSignatureDetector()
+        self.detector = FileDetector()
         
-        # Extension to category mapping - keeping it simple but comprehensive
-        self.ext_to_category = {
-            # Images
-            '.jpg': FileCategory.IMAGE, '.jpeg': FileCategory.IMAGE, '.png': FileCategory.IMAGE,
-            '.gif': FileCategory.IMAGE, '.bmp': FileCategory.IMAGE, '.svg': FileCategory.IMAGE,
-            '.webp': FileCategory.IMAGE, '.ico': FileCategory.IMAGE,
+        self.ext_map = {
+            '.jpg': FileCat.IMAGE, '.jpeg': FileCat.IMAGE, '.png': FileCat.IMAGE,
+            '.gif': FileCat.IMAGE, '.bmp': FileCat.IMAGE, '.svg': FileCat.IMAGE,
+            '.webp': FileCat.IMAGE, '.ico': FileCat.IMAGE,
             
-            # Documents  
-            '.pdf': FileCategory.DOCUMENT, '.doc': FileCategory.DOCUMENT, '.docx': FileCategory.DOCUMENT,
-            '.txt': FileCategory.DOCUMENT, '.rtf': FileCategory.DOCUMENT, '.odt': FileCategory.DOCUMENT,
-            '.xls': FileCategory.DOCUMENT, '.xlsx': FileCategory.DOCUMENT, '.ppt': FileCategory.DOCUMENT,
-            '.pptx': FileCategory.DOCUMENT,
+            '.pdf': FileCat.DOCUMENT, '.doc': FileCat.DOCUMENT, '.docx': FileCat.DOCUMENT,
+            '.txt': FileCat.DOCUMENT, '.rtf': FileCat.DOCUMENT, '.odt': FileCat.DOCUMENT,
+            '.xls': FileCat.DOCUMENT, '.xlsx': FileCat.DOCUMENT, '.ppt': FileCat.DOCUMENT,
+            '.pptx': FileCat.DOCUMENT,
             
-            # Media
-            '.mp4': FileCategory.VIDEO, '.avi': FileCategory.VIDEO, '.mkv': FileCategory.VIDEO,
-            '.mov': FileCategory.VIDEO, '.wmv': FileCategory.VIDEO, '.webm': FileCategory.VIDEO,
-            '.mp3': FileCategory.AUDIO, '.wav': FileCategory.AUDIO, '.flac': FileCategory.AUDIO,
-            '.aac': FileCategory.AUDIO, '.ogg': FileCategory.AUDIO,
+            '.mp4': FileCat.VIDEO, '.avi': FileCat.VIDEO, '.mkv': FileCat.VIDEO,
+            '.mov': FileCat.VIDEO, '.wmv': FileCat.VIDEO, '.webm': FileCat.VIDEO,
+            '.mp3': FileCat.AUDIO, '.wav': FileCat.AUDIO, '.flac': FileCat.AUDIO,
+            '.aac': FileCat.AUDIO, '.ogg': FileCat.AUDIO,
             
-            # Archives
-            '.zip': FileCategory.ARCHIVE, '.rar': FileCategory.ARCHIVE, '.7z': FileCategory.ARCHIVE,
-            '.tar': FileCategory.ARCHIVE, '.gz': FileCategory.ARCHIVE,
+            '.zip': FileCat.ARCHIVE, '.rar': FileCat.ARCHIVE, '.7z': FileCat.ARCHIVE,
+            '.tar': FileCat.ARCHIVE, '.gz': FileCat.ARCHIVE,
             
-            # Code
-            '.py': FileCategory.CODE, '.js': FileCategory.CODE, '.html': FileCategory.CODE,
-            '.css': FileCategory.CODE, '.java': FileCategory.CODE, '.cpp': FileCategory.CODE,
-            '.c': FileCategory.CODE, '.php': FileCategory.CODE, '.json': FileCategory.CODE,
-            '.xml': FileCategory.CODE, '.yml': FileCategory.CODE, '.yaml': FileCategory.CODE,
-            '.sh': FileCategory.CODE, '.script': FileCategory.CODE,
+            '.py': FileCat.CODE, '.js': FileCat.CODE, '.html': FileCat.CODE,
+            '.css': FileCat.CODE, '.java': FileCat.CODE, '.cpp': FileCat.CODE,
+            '.c': FileCat.CODE, '.php': FileCat.CODE, '.json': FileCat.CODE,
+            '.xml': FileCat.CODE, '.yml': FileCat.CODE, '.yaml': FileCat.CODE,
+            '.sh': FileCat.CODE, '.script': FileCat.CODE,
             
-            # Data
-            '.csv': FileCategory.DATA, '.sql': FileCategory.DATA, '.db': FileCategory.DATA,
+            '.csv': FileCat.DATA, '.sql': FileCat.DATA, '.db': FileCat.DATA,
         }
         
         self.files = []
         self.source_path = None
-        self.custom_regex_rules = []  # List of CustomRegexRule objects
+        self.rules = []
     
-    def _detect_version_info(self, file_path: Path) -> Tuple[Optional[str], Optional[str], bool]:
-        """
-        Detect if file follows version naming patterns and extract app name and version
-        
-        Returns:
-            Tuple of (app_name, version, is_versioned)
-        """
-        name = file_path.stem  # filename without extension
+    def get_version_info(self, file_path: Path) -> Tuple[Optional[str], Optional[str], bool]:
+        name = file_path.stem
         name_lower = name.lower()
         
-        # Version patterns to match
-        version_patterns = [
-            # Standard patterns: app_v1.2.3, app_v1, app_version1.0
+        patterns = [
             r'^(.+?)_v(\d+(?:\.\d+)*(?:\.\d+)?)$',
             r'^(.+?)_version(\d+(?:\.\d+)*(?:\.\d+)?)$',
             r'^(.+?)_ver(\d+(?:\.\d+)*(?:\.\d+)?)$',
-            
-            # Patterns with spaces: "App v1.2", "App Version 1.0"
             r'^(.+?)\s+v(\d+(?:\.\d+)*(?:\.\d+)?)$',
             r'^(.+?)\s+version\s+(\d+(?:\.\d+)*(?:\.\d+)?)$',
             r'^(.+?)\s+ver\s+(\d+(?:\.\d+)*(?:\.\d+)?)$',
-            
-            # Bracketed versions: app(v1.2), app[v1.0]
             r'^(.+?)\s*[\(\[]v?(\d+(?:\.\d+)*(?:\.\d+)?)[\)\]]$',
-            
-            # Simple numbered versions: app1, app2, myfile3
             r'^(.+?)(\d+)$',
-            
-            # Date-like versions: app_2024, app_20240903
             r'^(.+?)_(\d{4})(?:\d{4})?$',
             
-            # Release patterns: app_final, app_beta, app_alpha2
             r'^(.+?)_(final|beta|alpha|rc)(\d*)$',
         ]
         
-        for pattern in version_patterns:
+        for pattern in patterns:
             match = re.search(pattern, name_lower)
             if match:
                 app_name = match.group(1).strip()
                 version_part = match.group(2) if len(match.groups()) >= 2 else "1"
                 
-                # Clean up app name
                 app_name = re.sub(r'[_\-\s]+', ' ', app_name).strip()
                 
-                # Skip if app name is too generic or short
                 if len(app_name) < 2 or app_name in ['new', 'old', 'temp', 'test', 'file', 'document', 'image']:
                     continue
                 
-                # Handle release pattern specially
                 if len(match.groups()) >= 3:
                     release_type = match.group(2)
                     release_num = match.group(3) or ""
@@ -453,7 +498,7 @@ class FileSorter:
         
         return None, None, False
         
-    def scan_folder(self, folder_path: Union[str, Path]) -> List[FileInfo]:
+    def scan(self, folder_path: Union[str, Path]) -> List[FileData]:
         self.source_path = Path(folder_path)
         if not self.source_path.exists():
             raise ValueError(f"Folder doesn't exist: {folder_path}")
@@ -461,11 +506,11 @@ class FileSorter:
         self.files = []
         for file_path in self.source_path.rglob('*'):
             if file_path.is_file():
-                self.files.append(self._analyze_file(file_path))
+                self.files.append(self.analyze(file_path))
         
         return self.files
     
-    def _analyze_file(self, file_path: Path) -> FileInfo:
+    def analyze(self, file_path: Path) -> FileData:
         stat = file_path.stat()
         
         name = file_path.name
@@ -475,160 +520,138 @@ class FileSorter:
         modified = datetime.fromtimestamp(stat.st_mtime)
         is_hidden = name.startswith('.')
         
-        # Try content detection
-        detected_ext, detected_mime = self.detector.detect_file_type(file_path)
+        detected_ext, detected_mime = self.detector.detect_type(file_path)
         
-        # Check if file seems misnamed
         is_misnamed = False
         if detected_ext:
             if extension and extension != f".{detected_ext}":
-                # Only consider it misnamed if the detected type is very different
-                ext_category = self.ext_to_category.get(extension, FileCategory.OTHER)
-                detected_category = self.ext_to_category.get(f".{detected_ext}", FileCategory.OTHER)
-                # If both categories are the same, don't consider it misnamed
+                ext_category = self.ext_map.get(extension, FileCat.OTHER)
+                detected_category = self.ext_map.get(f".{detected_ext}", FileCat.OTHER)
                 if ext_category != detected_category:
                     is_misnamed = True
-            elif not extension:  # no extension but we detected one
+            elif not extension:
                 is_misnamed = True
         
-        # Choose the best extension/category
         final_ext = f".{detected_ext}" if detected_ext else extension
-        category = self.ext_to_category.get(final_ext, FileCategory.OTHER)
+        category = self.ext_map.get(final_ext, FileCat.OTHER)
         
-        # Always prioritize the file extension over content detection
-        # This prevents files like song.doc from being categorized as audio
         if extension:
-            category = self.ext_to_category.get(extension, FileCategory.OTHER)
+            category = self.ext_map.get(extension, FileCat.OTHER)
         
-        # Only use content detection for files without extensions
         if not extension and detected_ext:
-            detected_cat = self.ext_to_category.get(f".{detected_ext}", FileCategory.OTHER)
-            if detected_cat != FileCategory.OTHER:
+            detected_cat = self.ext_map.get(f".{detected_ext}", FileCat.OTHER)
+            if detected_cat != FileCat.OTHER:
                 category = detected_cat
         
-        # For clearly misnamed files, be very conservative about overriding
-        # Only override if the file has no meaningful extension
         elif is_misnamed and detected_ext and extension:
-            ext_category = self.ext_to_category.get(extension, FileCategory.OTHER)
-            detected_category = self.ext_to_category.get(f".{detected_ext}", FileCategory.OTHER)
+            ext_category = self.ext_map.get(extension, FileCat.OTHER)
+            detected_category = self.ext_map.get(f".{detected_ext}", FileCat.OTHER)
             
-            # Only override if original extension gives us "OTHER" category
-            # This preserves document files even if they have embedded media content
-            if ext_category == FileCategory.OTHER:
+            if ext_category == FileCat.OTHER:
                 category = detected_category
         
         mime_type = detected_mime or mimetypes.guess_type(str(file_path))[0]
         
-        # Detect version information
-        app_name, version, is_versioned = self._detect_version_info(file_path)
+        app_name, version, is_versioned = self.get_version_info(file_path)
         
-        return FileInfo(
+        file_info = FileData(
             path=file_path,
             name=name,
-            extension=extension,
+            ext=extension,
             size=size,
             created=created,
             modified=modified,
-            category=category,
-            mime_type=mime_type,
-            is_hidden=is_hidden,
-            detected_ext=detected_ext,
-            detected_mime=detected_mime,
-            is_misnamed=is_misnamed,
-            app_name=app_name,
-            version=version,
-            is_versioned=is_versioned
+            cat=category,
+            mime=mime_type,
+            hidden=is_hidden,
+            det_ext=detected_ext,
+            det_mime=detected_mime,
+            wrong=is_misnamed,
+            app=app_name,
+            ver=version,
+            versioned=is_versioned
         )
+        
+        file_info._parent_sorter = self
+        
+        return file_info
     
-    def recommend_strategy(self) -> Dict:
+    def recommend(self) -> Dict:
         if not self.files:
-            return {"strategy": SortCriteria.TYPE, "reason": "No files to analyze"}
+            return {"strategy": SortBy.TYPE, "reason": "No files to analyze"}
         
         total = len(self.files)
         categories = {}
         years = set()
         
         for f in self.files:
-            categories[f.category.value] = categories.get(f.category.value, 0) + 1
+            categories[f.cat.value] = categories.get(f.cat.value, 0) + 1
             years.add(f.year)
         
-        # Simple heuristics for strategies
-        
-        # If custom regex rules are defined, recommend using them
-        if self.custom_regex_rules:
+        if self.rules:
             matches = sum(1 for f in self.files 
-                         for rule in self.custom_regex_rules 
+                         for rule in self.rules 
                          if rule.matches(f.name))
-            if matches > total * 0.3:  # If >30% of files match custom rules
+            if matches > total * 0.3:
                 return {
-                    "strategy": SortCriteria.CUSTOM_REGEX,
+                    "strategy": SortBy.CUSTOM_REGEX,
                     "reason": f"Custom regex rules match {matches}/{total} files",
                     "confidence": 80
                 }
         
         if len(categories) > 3 and max(categories.values()) / total < 0.8:
             return {
-                "strategy": SortCriteria.TYPE,
+                "strategy": SortBy.TYPE,
                 "reason": f"Multiple file types found ({len(categories)} categories)",
                 "confidence": 85
             }
         
         if len(years) > 2:
             return {
-                "strategy": SortCriteria.DATE,
+                "strategy": SortBy.DATE,
                 "reason": f"Files span multiple years ({min(years)}-{max(years)})",
                 "confidence": 70
             }
         
-        # Default to type-based sorting
         return {
-            "strategy": SortCriteria.TYPE,
+            "strategy": SortBy.TYPE,
             "reason": "General purpose organization",
             "confidence": 60
         }
     
-    def add_custom_regex_rule(self, rule: CustomRegexRule) -> None:
-        """Add a custom regex rule for file organization"""
-        self.custom_regex_rules.append(rule)
+    def add_rule(self, rule: CustomRegexRule) -> None:
+        self.rules.append(rule)
     
-    def remove_custom_regex_rule(self, rule_name: str) -> bool:
-        """Remove a custom regex rule by name. Returns True if removed, False if not found"""
-        for i, rule in enumerate(self.custom_regex_rules):
+    def remove_rule(self, rule_name: str) -> bool:
+        for i, rule in enumerate(self.rules):
             if rule.name == rule_name:
-                del self.custom_regex_rules[i]
+                del self.rules[i]
                 return True
         return False
     
-    def clear_custom_regex_rules(self) -> None:
-        """Remove all custom regex rules"""
-        self.custom_regex_rules.clear()
+    def clear_rules(self) -> None:
+        self.rules.clear()
     
-    def get_custom_regex_rules(self) -> List[CustomRegexRule]:
-        """Get a copy of all custom regex rules"""
-        return self.custom_regex_rules.copy()
+    def get_rules(self) -> List[CustomRegexRule]:
+        return self.rules.copy()
     
-    def _apply_custom_regex_rules(self, file_info: FileInfo) -> str:
-        """Apply custom regex rules to determine destination folder"""
+    def apply_rules(self, file_info: FileData) -> str:
         filename = file_info.name
         
-        # Try each rule in order until one matches
-        for rule in self.custom_regex_rules:
+        for rule in self.rules:
             groups = rule.matches(filename)
             if groups:
                 try:
                     return rule.generate_folder_path(groups, file_info)
                 except Exception as e:
-                    # If rule fails, log it but continue to next rule
-                    print(f"Warning: Custom rule '{rule.name}' failed for '{filename}': {e}")
                     continue
         
-        # If no custom rules match, fall back to category-based organization
-        if file_info.is_versioned:
-            return f"custom_unmatched/{file_info.category.value}/{file_info.app_name}"
+        if file_info.versioned:
+            return f"custom_unmatched/{file_info.cat.value}/{file_info.app}"
         else:
-            return f"custom_unmatched/{file_info.category.value}"
+            return f"custom_unmatched/{file_info.cat.value}"
     
-    def validate_custom_regex_rule(self, rule: CustomRegexRule) -> List[str]:
+    def validate_rule(self, rule: CustomRegexRule) -> List[str]:
         """Validate a custom regex rule and return any errors found"""
         errors = []
         
@@ -641,14 +664,14 @@ class FileSorter:
         # Test folder template with dummy data
         try:
             dummy_groups = {'group1': 'test', 'group2': 'example'}
-            dummy_file_info = FileInfo(
+            dummy_file_info = FileData(
                 path=Path('test.txt'),
                 name='test.txt',
                 extension='.txt',
                 size=1024,
                 created=datetime.now(),
                 modified=datetime.now(),
-                category=FileCategory.DOCUMENT,
+                category=FileCat.DOCUMENT,
                 mime_type='text/plain',
                 is_hidden=False
             )
@@ -677,117 +700,123 @@ class FileSorter:
         
         return results
     
-    def organize_files(self, strategy: SortCriteria, dry_run: bool = True) -> Dict[str, List[str]]:
+    def organize_files(self, strategy: SortBy, dry_run: bool = True, create_backup: bool = True, exclude_new_files: bool = False) -> Dict[str, List[str]]:
         if not self.source_path:
-            raise ValueError("No source folder has been scanned. Call scan_folder() first.")
+            raise ValueError("No source folder has been scanned. Call scan() first.")
+
+        backup_path = None
+        backup_file_names = set()
         
-        target_path = self.source_path  # Organize within the same folder
+        if create_backup and not dry_run:
+            try:
+                backup_path = self.create_backup(strategy)
+                
+                if exclude_new_files:
+                    backup = self.load_backup(backup_path)
+                    backup_file_names = {entry.name for entry in backup.entries}
+                    
+            except Exception as e:
+                # Proceeding without backup...
+                pass
+
+        target_path = self.source_path
         plan = {}
+        excluded_new_files = []
         
         for file_info in self.files:
-            if strategy == SortCriteria.TYPE:
-                if file_info.is_versioned:
-                    # Group versioned files under their app name within category
-                    dest_folder = f"{file_info.category.value}/{file_info.app_name}"
+            if exclude_new_files and backup_file_names and file_info.name not in backup_file_names:
+                excluded_new_files.append(file_info.name)
+                continue
+                
+            if strategy == SortBy.TYPE:
+                if file_info.versioned:
+                    dest_folder = f"{file_info.cat.value}/{file_info.app}"
                 else:
-                    dest_folder = file_info.category.value
-            elif strategy == SortCriteria.DATE:
-                if file_info.is_versioned:
-                    # Group versioned files under their app name within date folders
-                    dest_folder = f"by_year/{file_info.year}/{file_info.app_name}"
+                    dest_folder = file_info.cat.value
+            elif strategy == SortBy.DATE:
+                if file_info.versioned:
+                    dest_folder = f"by_year/{file_info.year}/{file_info.app}"
                 else:
                     dest_folder = f"by_year/{file_info.year}"
-            elif strategy == SortCriteria.SIZE:
-                if file_info.is_versioned:
-                    # Group versioned files under their app name within size folders
-                    dest_folder = f"by_size/{file_info.size_category()}/{file_info.app_name}"
+            elif strategy == SortBy.SIZE:
+                if file_info.versioned:
+                    dest_folder = f"by_size/{file_info.size_cat()}/{file_info.app}"
                 else:
-                    dest_folder = f"by_size/{file_info.size_category()}"
-            elif strategy == SortCriteria.EXTENSION:
-                ext = file_info.extension[1:] if file_info.extension else "no_extension"
-                if file_info.is_versioned:
-                    # Group versioned files under their app name within extension folders
-                    dest_folder = f"by_extension/{ext}/{file_info.app_name}"
+                    dest_folder = f"by_size/{file_info.size_cat()}"
+            elif strategy == SortBy.EXTENSION:
+                ext = file_info.ext[1:] if file_info.ext else "no_extension"
+                if file_info.versioned:
+                    dest_folder = f"by_extension/{ext}/{file_info.app}"
                 else:
                     dest_folder = f"by_extension/{ext}"
-            elif strategy == SortCriteria.PROJECT:
-                project_name = file_info.guess_project()
-                if file_info.is_versioned:
-                    # For versioned files, use app name as project if it's different from guessed project
-                    if file_info.app_name.lower() != project_name.lower():
-                        dest_folder = f"projects/{file_info.app_name}"
+            elif strategy == SortBy.PROJECT:
+                project_name = file_info.guess_proj()
+                if file_info.versioned:
+                    if file_info.app.lower() != project_name.lower():
+                        dest_folder = f"projects/{file_info.app}"
                     else:
                         dest_folder = f"projects/{project_name}"
                 else:
                     dest_folder = f"projects/{project_name}"
-            elif strategy == SortCriteria.CUSTOM_REGEX:
-                dest_folder = self._apply_custom_regex_rules(file_info)
+            elif strategy == SortBy.CUSTOM_REGEX:
+                dest_folder = self.apply_rules(file_info)
             else:
-                # Default to category-based organization
-                if file_info.is_versioned:
-                    dest_folder = f"{file_info.category.value}/{file_info.app_name}"
+                if file_info.versioned:
+                    dest_folder = f"{file_info.cat.value}/{file_info.app}"
                 else:
-                    dest_folder = file_info.category.value
+                    dest_folder = file_info.cat.value
             
             if dest_folder not in plan:
                 plan[dest_folder] = []
             plan[dest_folder].append(str(file_info.path))
         
-        # Post-process: move beta/alpha versions under their main app folder if it exists
-        plan = self._consolidate_beta_versions(plan)
+        if excluded_new_files:
+            pass
+        
+        plan = self.beta_consolidate(plan)
         
         if not dry_run:
-            self._execute_plan(target_path, plan)
+            self.do_organize(target_path, plan)
+            
+            if backup_path:
+                self.update_backup_locations(backup_path, plan)
         
         return plan
     
-    def _consolidate_beta_versions(self, plan: Dict[str, List[str]]) -> Dict[str, List[str]]:
-        """
-        Move beta/alpha versions under their main app folder if it exists.
-        For example, if both 'tool' and 'tool beta' folders exist, move 'tool beta' under 'tool'.
-        """
+    def beta_consolidate(self, plan: Dict[str, List[str]]) -> Dict[str, List[str]]:
         new_plan = {}
         folders_to_remove = set()
-        
-        # First, identify potential beta/alpha folders and their main counterparts
         beta_mappings = {}
         
         for folder_path in plan.keys():
             folder_parts = folder_path.split('/')
-            if len(folder_parts) >= 2:  # category/app_name
+            if len(folder_parts) >= 2:
                 category = folder_parts[0]
-                app_name = folder_parts[-1].lower()  # Get the last part (app name)
+                app_name = folder_parts[-1].lower()
                 
-                # Check if this looks like a beta/alpha version
                 beta_indicators = ['beta', 'alpha', 'rc', 'dev', 'test', 'preview']
                 for indicator in beta_indicators:
                     if indicator in app_name:
-                        # Extract the base app name (remove beta/alpha part)
                         base_name = app_name.replace(f' {indicator}', '').replace(f'_{indicator}', '').replace(f'-{indicator}', '').replace(indicator, '').strip()
                         
-                        # Look for the main app folder in the same category
                         main_folder = f"{category}/{base_name}"
                         if main_folder in plan:
-                            # Found the main folder, plan to move beta under it
-                            beta_folder_name = folder_parts[-1]  # Keep original case
+                            beta_folder_name = folder_parts[-1]
                             new_beta_path = f"{main_folder}/{beta_folder_name}"
                             beta_mappings[folder_path] = new_beta_path
                             folders_to_remove.add(folder_path)
-                            break
+                        break
         
-        # Copy all folders to new plan, applying beta mappings
         for folder_path, files in plan.items():
             if folder_path in beta_mappings:
-                # This is a beta folder that should be moved
                 new_path = beta_mappings[folder_path]
                 new_plan[new_path] = files
             elif folder_path not in folders_to_remove:
-                # This is a regular folder (including main app folders)
                 new_plan[folder_path] = files
         
         return new_plan
     
-    def _execute_plan(self, target_path: Path, plan: Dict[str, List[str]]):
+    def do_organize(self, target_path: Path, plan: Dict[str, List[str]]):
         moved = 0
         skipped = 0
         
@@ -799,12 +828,10 @@ class FileSorter:
                 source = Path(file_path)
                 destination = dest_dir / source.name
                 
-                # Skip if file is already in the correct location
                 if source.parent == dest_dir:
                     skipped += 1
                     continue
                 
-                # Handle name conflicts
                 counter = 1
                 while destination.exists():
                     stem = source.stem
@@ -816,9 +843,7 @@ class FileSorter:
                     shutil.move(str(source), str(destination))
                     moved += 1
                 except Exception as e:
-                    print(f"Failed to move {source}: {e}")
-        
-        print(f"Moved {moved} files" + (f", skipped {skipped} files already in correct location" if skipped > 0 else ""))
+                    pass
     
     def get_summary(self, plan: Dict[str, List[str]]) -> str:
         total = sum(len(files) for files in plan.values())
@@ -846,46 +871,494 @@ class FileSorter:
             "total_files": len(self.files),
             "total_size": sum(f.size for f in self.files),
             "categories": {},
-            "misnamed_files": sum(1 for f in self.files if f.is_misnamed),
-            "extension_less": sum(1 for f in self.files if not f.extension),
-            "detected_types": sum(1 for f in self.files if f.detected_ext),
-            "versioned_files": sum(1 for f in self.files if f.is_versioned),
+            "misnamed_files": sum(1 for f in self.files if f.wrong),
+            "extension_less": sum(1 for f in self.files if not f.ext),
+            "detected_types": sum(1 for f in self.files if f.det_ext),
+            "versioned_files": sum(1 for f in self.files if f.versioned),
             "app_groups": {}
         }
         
         for f in self.files:
-            cat = f.category.value
+            cat = f.cat.value
             stats["categories"][cat] = stats["categories"].get(cat, 0) + 1
             
-            if f.is_versioned:
-                app = f.app_name
+            if f.versioned:
+                app = f.app
                 if app not in stats["app_groups"]:
                     stats["app_groups"][app] = {"count": 0, "versions": set()}
                 stats["app_groups"][app]["count"] += 1
-                stats["app_groups"][app]["versions"].add(f.version)
+                stats["app_groups"][app]["versions"].add(f.ver)
         
-        # Convert sets to lists for JSON serialization
         for app_info in stats["app_groups"].values():
             app_info["versions"] = sorted(list(app_info["versions"]))
         
         return stats
     
-    def get_versioned_files(self) -> List[FileInfo]:
-        return [f for f in self.files if f.is_versioned]
+    def get_versioned_files(self) -> List[FileData]:
+        return [f for f in self.files if f.versioned]
     
-    def get_version_groups(self) -> Dict[str, List[FileInfo]]:
-        """Group files by app name for version control analysis"""
+    def get_version_groups(self) -> Dict[str, List[FileData]]:
         groups = {}
         for f in self.files:
-            if f.is_versioned:
-                if f.app_name not in groups:
-                    groups[f.app_name] = []
-                groups[f.app_name].append(f)
+            if f.versioned:
+                if f.app not in groups:
+                    groups[f.app] = []
+                groups[f.app].append(f)
         return groups
     
-    def get_misnamed_files(self) -> List[FileInfo]:
-        return [f for f in self.files if f.is_misnamed]
+    def get_misnamed_files(self) -> List[FileData]:
+        return [f for f in self.files if f.wrong]
     
+    def analyze_existing_organization(self) -> Dict[str, float]:
+        if not self.files:
+            return {}
+        
+        folder_analysis = {}
+        
+        folder_file_counts = {}
+        folder_depths = {}
+        
+        for file_info in self.files:
+            parts = file_info.path.parts
+            
+            for i, part in enumerate(parts[:-1]):
+                folder_key = part.lower()
+                
+                if folder_key not in folder_file_counts:
+                    folder_file_counts[folder_key] = 0
+                    folder_depths[folder_key] = []
+                
+                folder_file_counts[folder_key] += 1
+                folder_depths[folder_key].append(i)
+        
+        for folder, count in folder_file_counts.items():
+            if count < 3:
+                continue
+                
+            usage_score = min(count / len(self.files), 0.5)
+            
+            depths = folder_depths[folder]
+            depth_consistency = 1.0 / (1.0 + len(set(depths)))
+            
+            avg_depth = sum(depths) / len(depths)
+            depth_score = 1.0 / (1.0 + abs(avg_depth - 3))
+            
+            significance = usage_score * depth_consistency * depth_score
+            folder_analysis[folder] = significance
+        
+        return folder_analysis
+    
+    def get_adaptive_project_suggestions(self) -> Dict[str, List[str]]:
+        """
+        Use the learned organizational patterns to suggest better project groupings.
+        """
+        patterns = self.analyze_existing_organization()
+        suggestions = {}
+        
+        # Group files by their most significant folder
+        for file_info in self.files:
+            best_folder = None
+            best_score = 0
+            
+            parts = file_info.path.parts
+            for part in parts[:-1]:  # exclude filename
+                folder_key = part.lower()
+                if folder_key in patterns and patterns[folder_key] > best_score:
+                    best_score = patterns[folder_key]
+                    best_folder = part
+            
+            if best_folder:
+                if best_folder not in suggestions:
+                    suggestions[best_folder] = []
+                suggestions[best_folder].append(file_info.name)
+        
+        return suggestions
+    
+    def create_backup(self, strategy: SortBy) -> str:
+        if not self.source_path or not self.files:
+            raise ValueError("No files to backup. Scan a folder first.")
+        
+        backup = Backup(
+            time=datetime.now().isoformat(),
+            dir=str(self.source_path),
+            strat=strategy.value,
+            total=len(self.files)
+        )
+        
+        for file_info in self.files:
+            try:
+                relative_path = file_info.path.relative_to(self.source_path)
+            except ValueError:
+                relative_path = file_info.path
+            
+            entry = BkpEntry(
+                orig=str(relative_path),
+                curr=str(relative_path),
+                name=file_info.name,
+                size=file_info.size,
+                mod=file_info.modified.isoformat()
+            )
+            backup.entries.append(entry)
+        
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"reorg_backup_{timestamp_str}.bkp"
+        backup_path = self.source_path / backup_filename
+        
+        backup_data = {
+            'timestamp': backup.time,
+            'source_directory': backup.dir,
+            'strategy_used': backup.strat,
+            'total_files': backup.total,
+            'backup_version': backup.ver,
+            'entries': [
+                {
+                    'original_path': entry.orig,
+                    'current_path': entry.curr,
+                    'file_name': entry.name,
+                    'file_size': entry.size,
+                    'last_modified': entry.mod,
+                    'checksum': entry.checksum
+                }
+                for entry in backup.entries
+            ]
+        }
+        
+        try:
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                json.dump(backup_data, f, indent=2, ensure_ascii=False)
+            
+            return str(backup_path)
+            
+        except Exception as e:
+            raise Exception(f"Failed to create backup file: {e}")
+    
+    def load_backup(self, backup_path: Union[str, Path]) -> Backup:
+        """Load a backup file and return the SortingBackup object"""
+        backup_path = Path(backup_path)
+        
+        if not backup_path.exists():
+            raise FileNotFoundError(f"Backup file not found: {backup_path}")
+        
+        if not backup_path.suffix == '.bkp':
+            raise ValueError("Invalid backup file. Must have .bkp extension")
+        
+        try:
+            with open(backup_path, 'r', encoding='utf-8') as f:
+                backup_data = json.load(f)
+            
+            # Validate backup format
+            required_fields = ['timestamp', 'source_directory', 'strategy_used', 'total_files', 'entries']
+            for field in required_fields:
+                if field not in backup_data:
+                    raise ValueError(f"Invalid backup file: missing '{field}' field")
+            
+            # Create backup object
+            backup = Backup(
+                timestamp=backup_data['timestamp'],
+                source_directory=backup_data['source_directory'],
+                strategy_used=backup_data['strategy_used'],
+                total_files=backup_data['total_files'],
+                backup_version=backup_data.get('backup_version', '1.0')
+            )
+            
+            # Load entries
+            for entry_data in backup_data['entries']:
+                entry = BkpEntry(
+                    original_path=entry_data['original_path'],
+                    current_path=entry_data['current_path'],
+                    file_name=entry_data['file_name'],
+                    file_size=entry_data['file_size'],
+                    last_modified=entry_data['last_modified'],
+                    checksum=entry_data.get('checksum')
+                )
+                backup.entries.append(entry)
+            
+            return backup
+            
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid backup file format: {e}")
+        except Exception as e:
+            raise Exception(f"Failed to load backup file: {e}")
+    
+    def restore_from_backup(self, backup_path: Union[str, Path], dry_run: bool = True) -> Dict[str, any]:
+        """
+        Restore files to their original locations using a backup file.
+        
+        Args:
+            backup_path: Path to the .bkp backup file
+            dry_run: If True, only show what would be restored without moving files
+            
+        Returns:
+            Dictionary with restoration results and statistics
+        """
+        backup = self.load_backup(backup_path)
+        
+        # Verify we're in the correct directory
+        current_source = Path(backup.source_directory)
+        if not current_source.exists():
+            raise ValueError(f"Original source directory not found: {current_source}")
+        
+        # Track restoration progress
+        results = {
+            'total_entries': len(backup.entries),
+            'restored': 0,
+            'missing': 0,
+            'conflicts': 0,
+            'errors': 0,
+            'updated_files': 0,
+            'user_deleted': 0,
+            'user_updated': 0,
+            'missing_files': [],
+            'conflicts_found': [],
+            'errors_encountered': [],
+            'updated_files_info': [],
+            'user_decisions': []
+        }
+        
+        # Restore operation starting
+        
+        # First pass: identify all files and their status
+        missing_entries = []
+        
+        for entry in backup.entries:
+            try:
+                # Construct current and original paths
+                original_abs_path = current_source / entry.original_path
+                
+                # Try to find the file using multiple methods
+                current_file = self._find_file_for_restore(entry, current_source)
+                
+                if not current_file:
+                    missing_entries.append(entry)
+                    continue
+                
+                # Check if file is already in the correct location
+                if current_file == original_abs_path:
+                    results['restored'] += 1  # Already in correct place
+                    continue
+                
+                # Check for conflicts at destination
+                if original_abs_path.exists() and original_abs_path != current_file:
+                    results['conflicts'] += 1
+                    results['conflicts_found'].append({
+                        'file': entry.file_name,
+                        'original_location': str(original_abs_path),
+                        'blocking_file': str(original_abs_path)
+                    })
+                    continue
+                
+                if not dry_run:
+                    # Create destination directory if needed
+                    original_abs_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Move file back to original location
+                    shutil.move(str(current_file), str(original_abs_path))
+                
+                results['restored'] += 1
+                
+            except Exception as e:
+                results['errors'] += 1
+                results['errors_encountered'].append({
+                    'file': entry.file_name,
+                    'error': str(e)
+                })
+        
+        # Handle missing files non-interactively
+        if missing_entries:
+            # Non-interactive mode - just count as missing
+            results['missing'] = len(missing_entries)
+            results['missing_files'] = [entry.file_name for entry in missing_entries]
+        
+        # Restore operation complete
+        
+        return results
+    
+    def _find_file_for_restore(self, entry: BkpEntry, search_dir: Path) -> Optional[Path]:
+        """
+        Find a file for restoration using multiple identification methods.
+        
+        Args:
+            entry: The backup entry to find
+            search_dir: Directory to search in
+            
+        Returns:
+            Path to the found file, or None if not found
+        """
+        # Method 1: Exact name and size match
+        for file_path in search_dir.rglob(entry.file_name):
+            if file_path.is_file() and file_path.stat().st_size == entry.file_size:
+                return file_path
+        
+        # Method 2: Name match with different size (potential update)
+        name_matches = []
+        for file_path in search_dir.rglob(entry.file_name):
+            if file_path.is_file():
+                name_matches.append(file_path)
+        
+        if name_matches:
+            # If there's only one file with the same name, it's likely the updated version
+            if len(name_matches) == 1:
+                file_path = name_matches[0]
+                # Check if modification time suggests it was updated after backup
+                try:
+                    backup_time = datetime.fromisoformat(entry.last_modified)
+                    file_time = datetime.fromtimestamp(file_path.stat().st_mtime)
+                    if file_time > backup_time:
+                        # File was modified after backup - likely updated
+                        return file_path
+                except (ValueError, OSError):
+                    pass
+        
+        return None
+    
+    def _find_similar_files(self, entry: BkpEntry, search_dir: Path) -> List[Tuple[Path, int]]:
+        """
+        Find files with similar names to the missing file.
+        
+        Args:
+            entry: The backup entry to find similar files for
+            search_dir: Directory to search in
+            
+        Returns:
+            List of tuples (file_path, file_size) sorted by similarity
+        """
+        similar_files = []
+        entry_name_lower = entry.file_name.lower()
+        entry_stem = Path(entry.file_name).stem.lower()
+        
+        for file_path in search_dir.rglob('*'):
+            if not file_path.is_file():
+                continue
+                
+            file_name_lower = file_path.name.lower()
+            file_stem_lower = file_path.stem.lower()
+            
+            # Skip exact matches (these should have been found already)
+            if file_path.name == entry.file_name:
+                continue
+            
+            similarity_score = 0
+            
+            # Check for stem similarity (filename without extension)
+            if entry_stem in file_stem_lower or file_stem_lower in entry_stem:
+                similarity_score += 3
+            
+            # Check for partial name matches
+            if entry_stem in file_name_lower or file_name_lower in entry_name_lower:
+                similarity_score += 2
+            
+            # Check for same extension
+            if Path(entry.file_name).suffix.lower() == file_path.suffix.lower():
+                similarity_score += 1
+            
+            if similarity_score > 0:
+                try:
+                    file_size = file_path.stat().st_size
+                    similar_files.append((file_path, file_size))
+                except OSError:
+                    continue
+        
+        # Sort by similarity (we could implement more sophisticated scoring)
+        # For now, just sort by name similarity
+        similar_files.sort(key=lambda x: x[0].name.lower())
+        
+        return similar_files
+
+    def _format_size(self, size_bytes: int) -> str:
+        """Format file size in human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
+    
+    def _format_size(self, size_bytes: int) -> str:
+        """Format file size in human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
+    
+    def list_available_backups(self, directory: Optional[Union[str, Path]] = None) -> List[Dict[str, str]]:
+        """
+        List all available backup files in the specified directory.
+        If no directory specified, uses the current source directory.
+        """
+        search_dir = Path(directory) if directory else self.source_path
+        
+        if not search_dir or not search_dir.exists():
+            return []
+        
+        backups = []
+        for backup_file in search_dir.glob("*.bkp"):
+            try:
+                backup = self.load_backup(backup_file)
+                backups.append({
+                    'filename': backup_file.name,
+                    'path': str(backup_file),
+                    'timestamp': backup.timestamp,
+                    'strategy': backup.strategy_used,
+                    'file_count': backup.total_files,
+                    'size': f"{backup_file.stat().st_size} bytes"
+                })
+            except Exception:
+                # Skip invalid backup files
+                continue
+        
+        # Sort by timestamp (newest first)
+        backups.sort(key=lambda x: x['timestamp'], reverse=True)
+        return backups
+    
+    def update_backup_locations(self, backup_path: str, organization_plan: Dict[str, List[str]]) -> None:
+        """Update the backup file with new file locations after organizing"""
+        try:
+            backup = self.load_backup(backup_path)
+            
+            # Create a mapping from filename to new location
+            file_to_new_location = {}
+            for dest_folder, file_paths in organization_plan.items():
+                for file_path in file_paths:
+                    file_name = Path(file_path).name
+                    # Store relative path from source directory
+                    try:
+                        relative_new_path = Path(dest_folder) / file_name
+                        file_to_new_location[file_name] = str(relative_new_path)
+                    except Exception:
+                        continue
+            
+            # Update backup entries with new locations
+            for entry in backup.entries:
+                if entry.file_name in file_to_new_location:
+                    entry.current_path = file_to_new_location[entry.file_name]
+            
+            # Save updated backup
+            backup_data = {
+                'timestamp': backup.timestamp,
+                'source_directory': backup.source_directory,
+                'strategy_used': backup.strategy_used,
+                'total_files': backup.total_files,
+                'backup_version': backup.backup_version,
+                'entries': [
+                    {
+                        'original_path': entry.original_path,
+                        'current_path': entry.current_path,
+                        'file_name': entry.file_name,
+                        'file_size': entry.file_size,
+                        'last_modified': entry.last_modified,
+                        'checksum': entry.checksum
+                    }
+                    for entry in backup.entries
+                ]
+            }
+            
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                json.dump(backup_data, f, indent=2, ensure_ascii=False)
+                
+        except Exception as e:
+            # Warning: Could not update backup with new locations - continuing silently
+            pass
+
     def detection_report(self) -> str:
         if not self.files:
             return "No files analyzed."
@@ -1011,78 +1484,6 @@ def create_example_regex_rules() -> List[CustomRegexRule]:
     ]
 
 
-def create_custom_regex_rule_interactive() -> Optional[CustomRegexRule]:
-    """Interactive helper to create a custom regex rule with validation"""
-    print("\n" + "="*50)
-    print("CREATE CUSTOM REGEX RULE")
-    print("="*50)
-    
-    try:
-        name = input("Rule name: ").strip()
-        if not name:
-            print("Rule name cannot be empty")
-            return None
-        
-        print("\nRegex pattern (use named groups like (?P<name>pattern) for better templates):")
-        pattern = input("Pattern: ").strip()
-        if not pattern:
-            print("Pattern cannot be empty")
-            return None
-        
-        print("\nFolder template (use {group_name} or {group1}, {group2}, etc.):")
-        print("Available variables: {category}, {year}, {month}, {size_category}, {extension}, {detected_ext}")
-        folder_template = input("Template: ").strip()
-        if not folder_template:
-            print("Folder template cannot be empty")
-            return None
-        
-        description = input("Description (optional): ").strip()
-        
-        case_sensitive = input("Case sensitive? (y/N): ").strip().lower() == 'y'
-        
-        rule = CustomRegexRule(
-            name=name,
-            pattern=pattern,
-            folder_template=folder_template,
-            description=description,
-            case_sensitive=case_sensitive
-        )
-        
-        # Test the rule
-        print("\nTesting rule...")
-        test_filename = input("Enter a test filename (or press Enter to skip): ").strip()
-        if test_filename:
-            matches = rule.matches(test_filename)
-            if matches:
-                print(f"✓ Matches! Groups found: {matches}")
-                # Create a dummy FileInfo for template testing
-                dummy_file = FileInfo(
-                    path=Path(test_filename),
-                    name=test_filename,
-                    extension=Path(test_filename).suffix,
-                    size=1024,
-                    created=datetime.now(),
-                    modified=datetime.now(),
-                    category=FileCategory.OTHER,
-                    mime_type='text/plain',
-                    is_hidden=False
-                )
-                try:
-                    dest = rule.generate_folder_path(matches, dummy_file)
-                    print(f"✓ Would organize to: {dest}")
-                except Exception as e:
-                    print(f"✗ Template error: {e}")
-                    return None
-            else:
-                print("✗ No match found")
-        
-        return rule
-        
-    except KeyboardInterrupt:
-        print("\nCancelled")
-        return None
-
-
 def format_size(size_bytes: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size_bytes < 1024.0:
@@ -1152,92 +1553,3 @@ def create_test_files(test_folder: Union[str, Path]):
         days_ago = random.randint(1, 365)
         timestamp = time.time() - (days_ago * 24 * 3600)
         os.utime(file_path, (timestamp, timestamp))
-
-
-if __name__ == "__main__":
-    sorter = FileSorter()
-    
-    test_folder = "test_files"
-    create_test_files(test_folder)
-    print(f"Created test files in {test_folder}")
-    
-    files = sorter.scan_folder(test_folder)
-    print(f"Found {len(files)} files")
-    
-    # Show detection results
-    print("\n" + sorter.detection_report())
-    
-    # Show version control detection
-    print(sorter.version_control_report())
-    
-    # Demonstrate custom regex rules
-    print("\n" + "="*50)
-    print("CUSTOM REGEX RULES DEMONSTRATION")
-    print("="*50)
-    
-    # Add some example rules
-    example_rules = create_example_regex_rules()
-    
-    # Add a rule specifically for our test files
-    custom_rule = CustomRegexRule(
-        name="Test Files",
-        pattern=r"(?P<type>script|data|page|report)",
-        folder_template="custom/{type}_files",
-        description="Custom rule for test files"
-    )
-    
-    sorter.add_custom_regex_rule(custom_rule)
-    
-    # Add a versioned files rule
-    version_rule = CustomRegexRule(
-        name="Version Control",
-        pattern=r"(?P<app>\w+)_v(?P<version>\d+\.\d+)",
-        folder_template="software/{app}/versions/v{version}",
-        description="Organize versioned software by app and version"
-    )
-    sorter.add_custom_regex_rule(version_rule)
-    
-    print(f"Added {len(sorter.get_custom_regex_rules())} custom rules")
-    
-    # Test the rules
-    test_results = sorter.test_custom_regex_rules()
-    for rule_name, matches in test_results.items():
-        if matches:
-            print(f"\nRule '{rule_name}' matches:")
-            for filename, dest in matches[:3]:  # Show first 3 matches
-                print(f"  {filename} → {dest}")
-            if len(matches) > 3:
-                print(f"  ... and {len(matches) - 3} more")
-    
-    recommendation = sorter.recommend_strategy()
-    print(f"\nRecommended: {recommendation['strategy'].value}")
-    print(f"Reason: {recommendation['reason']}")
-    
-    # Try organizing with custom regex if rules match files
-    if recommendation['strategy'] == SortCriteria.CUSTOM_REGEX:
-        plan = sorter.organize_files(SortCriteria.CUSTOM_REGEX)
-        print(f"\nCustom Regex Organization Plan:")
-        print(sorter.get_summary(plan))
-    else:
-        plan = sorter.organize_files(recommendation['strategy'])
-        print(f"\n{sorter.get_summary(plan)}")
-    
-    stats = sorter.get_stats()
-    print("Statistics:")
-    print(f"Total size: {format_size(stats['total_size'])}")
-    print(f"Categories: {stats['categories']}")
-    print(f"Misnamed files: {stats['misnamed_files']}")
-    print(f"Detected types: {stats['detected_types']}")
-    print(f"Versioned files: {stats['versioned_files']}")
-    if stats['app_groups']:
-        print(f"App groups: {list(stats['app_groups'].keys())}")
-    
-    # Show example rules that users can use
-    print("\n" + "="*50)
-    print("EXAMPLE REGEX RULES")
-    print("="*50)
-    print("Here are some example custom regex rules you can use:")
-    for rule in example_rules[:5]:  # Show first 5 examples
-        print(f"\n• {rule.name}: {rule.description}")
-        print(f"  Pattern: {rule.pattern}")
-        print(f"  Template: {rule.folder_template}")

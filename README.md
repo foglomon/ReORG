@@ -106,22 +106,6 @@ Version groups detected:
   📦 gamedata: 4 files, versions 1, 2, 3, final
 ```
 
-## Command Line Usage
-
-```bash
-# Analyze current directory
-python sort.py
-
-# Organize a specific folder
-python -c "
-from sort import FileSorter
-sorter = FileSorter()
-sorter.scan_folder('Downloads')
-strategy = sorter.recommend_strategy()
-sorter.organize_files('Organized', strategy['strategy'], dry_run=False)
-"
-```
-
 ## Supported File Types
 
 | Category      | Extensions                    | Detection Method      |
