@@ -1,7 +1,3 @@
-# This Tool is currently under development and may not be fully functional. For any bugs or issues, please open an issue on GitHub.
-
----
-
 # ReORG - Intelligent File Organizer
 
 A Python tool that automatically organizes files by analyzing their actual content, not just their names or extensions. Perfect for cleaning up messy download folders, organizing project files, or sorting any collection of mixed file types.
@@ -14,6 +10,7 @@ ReORG uses **content-aware detection** to identify what files actually are, then
 - **Smart categorization**: Groups files by type, date, size, or project
 - **Magic byte analysis**: Reads file signatures to determine true file types
 - **Version control detection**: Groups files like `app_v1.exe`, `app_v2.1.zip` into organized folders
+- **File compression**: Organize files into archives (ZIP, TAR, TAR.GZ) with automatic cleanup
 - **Flexible organization**: Multiple sorting strategies based on your needs
 
 ## Quick Start
@@ -30,7 +27,7 @@ python sort.py
 ## Basic Usage
 
 ```python
-from sort import FileSorter
+from sort import FileSorter, CompressionFormat
 
 # Create sorter and scan a folder
 sorter = FileSorter()
@@ -47,6 +44,14 @@ print(sorter.get_summary(plan))
 
 # Actually organize files
 sorter.organize_files("organized_output", strategy['strategy'], dry_run=False)
+
+# Or organize and compress into a ZIP archive
+archive_path = sorter.organize_files(
+    strategy=strategy['strategy'],
+    dry_run=False,
+    compression=CompressionFormat.ZIP
+)
+print(f"Created archive: {archive_path}")
 ```
 
 ## Features
@@ -108,8 +113,8 @@ Version groups detected:
 
 ## Supported File Types
 
-| Category      | Extensions                    | Detection Method      |
-| ------------- | ----------------------------- | --------------------- |
+| Category            | Extensions                    | Detection Method      |
+| ------------------- | ----------------------------- | --------------------- |
 | **Images**    | jpg, png, gif, bmp, webp, ico | Magic bytes           |
 | **Documents** | pdf, doc, docx, txt, rtf, odt | Magic bytes + content |
 | **Videos**    | mp4, avi, mkv, mov, wmv, webm | Magic bytes           |

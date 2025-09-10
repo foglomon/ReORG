@@ -3,12 +3,65 @@ import re
 import shutil
 import mimetypes
 import zipfile
+import tarfile
+import gzip
 import json
+import threading
+import time
+import pickle
+import logging
+import tempfile
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, List, Tuple, Optional, Union
-from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional, Union, Callable
+from dataclasses import dataclass, field
 from enum import Enum
+
+try:
+    import rarfile
+    RAR_AVAILABLE = True
+except ImportError:
+    RAR_AVAILABLE = False
+
+
+def setup_error_logging():
+    temp_dir = Path(tempfile.gettempdir()) / "reorg_logs"
+    temp_dir.mkdir(exist_ok=True)
+    
+    cutoff_date = datetime.now() - timedelta(days=30)
+    for log_file in temp_dir.glob("reorg_*.log"):
+        try:
+            if datetime.fromtimestamp(log_file.stat().st_mtime) < cutoff_date:
+                log_file.unlink()
+        except (OSError, ValueError):
+            pass
+    
+    logger = logging.getLogger('reorg')
+    logger.setLevel(logging.INFO)
+    
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = temp_dir / f"reorg_{timestamp}.log"
+    
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(formatter)
+    
+    logger.addHandler(file_handler)
+    
+    print(f"ReORG error logs will be saved to: {log_file}")
+    logger.info(f"ReORG session started - Log file: {log_file}")
+    
+    return logger
+
+logger = setup_error_logging()
 
 
 class FileDetector:
@@ -70,7 +123,14 @@ class FileDetector:
                 
             return None, None
             
-        except:
+        except PermissionError as e:
+            logger.warning(f"Permission denied accessing file {file_path}: {e}")
+            return None, None
+        except OSError as e:
+            logger.error(f"OS error reading file {file_path}: {e}")
+            return None, None
+        except Exception as e:
+            logger.error(f"Unexpected error detecting file type for {file_path}: {e}")
             return None, None
     
     def check_riff(self, data: bytes, file_path: Path) -> Optional[Tuple[str, str]]:
@@ -98,8 +158,12 @@ class FileDetector:
                 elif 'META-INF/manifest.xml' in files:
                     return 'odt', 'application/vnd.oasis.opendocument.text'
                 
-        except:
-            pass
+        except zipfile.BadZipFile as e:
+            logger.debug(f"File {file_path} is not a valid ZIP file: {e}")
+        except PermissionError as e:
+            logger.warning(f"Permission denied accessing ZIP file {file_path}: {e}")
+        except Exception as e:
+            logger.error(f"Error checking ZIP file {file_path}: {e}")
         
         return 'zip', 'application/zip'
     
@@ -115,8 +179,12 @@ class FileDetector:
             elif b'Microsoft Office PowerPoint' in content:
                 return 'ppt', 'application/vnd.ms-powerpoint'
                 
-        except:
-            pass
+        except PermissionError as e:
+            logger.warning(f"Permission denied accessing OLE file {file_path}: {e}")
+        except OSError as e:
+            logger.error(f"OS error reading OLE file {file_path}: {e}")
+        except Exception as e:
+            logger.error(f"Error checking OLE file {file_path}: {e}")
         
         return 'doc', 'application/msword'
     
@@ -134,7 +202,10 @@ class FileDetector:
                 if 32 <= b <= 126 or b in [9, 10, 13]:
                     count += 1
             return count / len(data) > 0.7
-        except:
+        except UnicodeDecodeError:
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking if data is text: {e}")
             return False
     
     def guess_text(self, file_path: Path, data: bytes) -> Tuple[str, str]:
@@ -162,8 +233,10 @@ class FileDetector:
             elif '#include' in content and 'main(' in content:
                 return 'c', 'text/x-c'
                 
-        except:
-            pass
+        except UnicodeDecodeError:
+            logger.debug(f"File {file_path} contains non-UTF-8 text")
+        except Exception as e:
+            logger.debug(f"Error analyzing text file {file_path}: {e}")
         
         return 'txt', 'text/plain'
 
@@ -189,6 +262,28 @@ class SortBy(Enum):
     CUSTOM_REGEX = "custom_regex"
 
 
+class CompressionFormat(Enum):
+    NONE = "none"
+    ZIP = "zip"
+    RAR = "rar"
+    TAR_GZ = "tar.gz"
+
+
+class ScheduleType(Enum):
+    ONE_TIME = "one_time"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
+class ScheduleStatus(Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 @dataclass
 class BkpEntry:
     orig: str
@@ -211,6 +306,27 @@ class Backup:
     def __post_init__(self):
         if self.entries is None:
             self.entries = []
+
+
+@dataclass
+class ScheduleTask:
+    id: str
+    name: str
+    folder_path: str
+    strategy: 'SortBy'
+    compression: CompressionFormat
+    schedule_type: ScheduleType
+    next_run: datetime
+    status: ScheduleStatus = ScheduleStatus.PENDING
+    created: datetime = field(default_factory=datetime.now)
+    last_run: Optional[datetime] = None
+    last_result: Optional[str] = None
+    error_message: Optional[str] = None
+    # For recurring schedules
+    interval_days: Optional[int] = None
+    run_count: int = 0
+    max_runs: Optional[int] = None
+    enabled: bool = True
 
 
 @dataclass
@@ -499,15 +615,34 @@ class FileSorter:
         return None, None, False
         
     def scan(self, folder_path: Union[str, Path]) -> List[FileData]:
-        self.source_path = Path(folder_path)
-        if not self.source_path.exists():
-            raise ValueError(f"Folder doesn't exist: {folder_path}")
-        
         self.files = []
-        for file_path in self.source_path.rglob('*'):
-            if file_path.is_file():
-                self.files.append(self.analyze(file_path))
+        self.source_path = Path(folder_path)
         
+        if not self.source_path.exists():
+            logger.error(f"Source path does not exist: {folder_path}")
+            raise ValueError(f"Folder doesn't exist: {folder_path}")
+            
+        if not self.source_path.is_dir():
+            logger.error(f"Source path is not a directory: {folder_path}")
+            raise ValueError(f"Path is not a directory: {folder_path}")
+        
+        logger.info(f"Starting scan of directory: {folder_path}")
+        
+        try:
+            for file_path in self.source_path.rglob('*'):
+                if file_path.is_file():
+                    try:
+                        file_info = self.analyze(file_path)
+                        self.files.append(file_info)
+                    except PermissionError as e:
+                        logger.warning(f"Permission denied accessing file {file_path}: {e}")
+                    except Exception as e:
+                        logger.error(f"Error analyzing file {file_path}: {e}")
+        except Exception as e:
+            logger.error(f"Error during directory scan: {e}")
+            raise
+        
+        logger.info(f"Scan completed. Found {len(self.files)} files.")
         return self.files
     
     def analyze(self, file_path: Path) -> FileData:
@@ -652,37 +787,33 @@ class FileSorter:
             return f"custom_unmatched/{file_info.cat.value}"
     
     def validate_rule(self, rule: CustomRegexRule) -> List[str]:
-        """Validate a custom regex rule and return any errors found"""
         errors = []
         
-        # Test regex pattern
         try:
             re.compile(rule.pattern)
         except re.error as e:
             errors.append(f"Invalid regex pattern: {e}")
         
-        # Test folder template with dummy data
         try:
-            dummy_groups = {'group1': 'test', 'group2': 'example'}
-            dummy_file_info = FileData(
-                path=Path('test.txt'),
-                name='test.txt',
-                extension='.txt',
+            validation_groups = {'group1': 'example', 'group2': 'value'}
+            validation_file = FileData(
+                path=Path('validation.txt'),
+                name='validation.txt',
+                ext='.txt',
                 size=1024,
                 created=datetime.now(),
                 modified=datetime.now(),
-                category=FileCat.DOCUMENT,
-                mime_type='text/plain',
-                is_hidden=False
+                cat=FileCat.DOCUMENT,
+                mime='text/plain',
+                hidden=False
             )
-            rule.generate_folder_path(dummy_groups, dummy_file_info)
+            rule.generate_folder_path(validation_groups, validation_file)
         except Exception as e:
             errors.append(f"Invalid folder template: {e}")
         
         return errors
     
     def test_custom_regex_rules(self) -> Dict[str, List[Tuple[str, str]]]:
-        """Test custom regex rules against current files and return matches"""
         results = {}
         
         for rule in self.custom_regex_rules:
@@ -700,7 +831,8 @@ class FileSorter:
         
         return results
     
-    def organize_files(self, strategy: SortBy, dry_run: bool = True, create_backup: bool = True, exclude_new_files: bool = False) -> Dict[str, List[str]]:
+    def organize_files(self, strategy: SortBy, dry_run: bool = True, create_backup: bool = True, 
+                      exclude_new_files: bool = False, compression: CompressionFormat = CompressionFormat.NONE) -> Union[Dict[str, List[str]], str]:
         if not self.source_path:
             raise ValueError("No source folder has been scanned. Call scan() first.")
 
@@ -716,8 +848,8 @@ class FileSorter:
                     backup_file_names = {entry.name for entry in backup.entries}
                     
             except Exception as e:
-                # Proceeding without backup...
-                pass
+                logger.warning(f"Failed to create backup: {e}")
+                backup_path = None
 
         target_path = self.source_path
         plan = {}
@@ -776,10 +908,18 @@ class FileSorter:
         plan = self.beta_consolidate(plan)
         
         if not dry_run:
-            self.do_organize(target_path, plan)
-            
-            if backup_path:
-                self.update_backup_locations(backup_path, plan)
+            if compression != CompressionFormat.NONE:
+                archive_path = self.compress_organized_files(target_path, plan, compression)
+                
+                if backup_path:
+                    self.update_backup_locations(backup_path, plan)
+                
+                return archive_path
+            else:
+                self.do_organize(target_path, plan)
+                
+                if backup_path:
+                    self.update_backup_locations(backup_path, plan)
         
         return plan
     
@@ -842,8 +982,122 @@ class FileSorter:
                 try:
                     shutil.move(str(source), str(destination))
                     moved += 1
+                    logger.info(f"Moved file: {source} -> {destination}")
+                except PermissionError as e:
+                    logger.warning(f"Permission denied moving file {source}: {e}")
+                    skipped += 1
+                except OSError as e:
+                    logger.error(f"OS error moving file {source}: {e}")
+                    skipped += 1
                 except Exception as e:
-                    pass
+                    logger.error(f"Unexpected error moving file {source}: {e}")
+                    skipped += 1
+    
+    def compress_organized_files(self, target_path: Path, plan: Dict[str, List[str]], 
+                                compression_format: CompressionFormat = CompressionFormat.ZIP) -> str:
+        if compression_format == CompressionFormat.NONE:
+            self.do_organize(target_path, plan)
+            return str(target_path)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_org_dir = target_path / f"reorg_temp_{timestamp}"
+        temp_org_dir.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            self._organize_to_temp_dir(temp_org_dir, plan)
+            
+            if compression_format == CompressionFormat.ZIP:
+                archive_path = target_path / f"organized_files_{timestamp}.zip"
+                self._create_zip_archive(temp_org_dir, archive_path)
+            elif compression_format == CompressionFormat.RAR:
+                archive_path = target_path / f"organized_files_{timestamp}.rar"
+                actual_archive_path = self._create_rar_archive(temp_org_dir, archive_path)
+                archive_path = actual_archive_path
+            elif compression_format == CompressionFormat.TAR_GZ:
+                archive_path = target_path / f"organized_files_{timestamp}.tar.gz"
+                self._create_tar_archive(temp_org_dir, archive_path, compressed=True)
+            else:
+                raise ValueError(f"Unsupported compression format: {compression_format}")
+            
+            return str(archive_path)
+            
+        finally:
+            if temp_org_dir.exists():
+                shutil.rmtree(temp_org_dir)
+    
+    def _organize_to_temp_dir(self, temp_dir: Path, plan: Dict[str, List[str]]):
+        moved = 0
+        
+        for dest_folder, file_paths in plan.items():
+            dest_dir = temp_dir / dest_folder
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            
+            for file_path in file_paths:
+                source = Path(file_path)
+                destination = dest_dir / source.name
+                
+                counter = 1
+                while destination.exists():
+                    stem = source.stem
+                    suffix = source.suffix
+                    destination = dest_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+                
+                try:
+                    shutil.copy2(str(source), str(destination))
+                    moved += 1
+                except Exception as e:
+                    continue
+    
+    def _create_zip_archive(self, source_dir: Path, archive_path: Path):
+        with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in source_dir.rglob('*'):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(source_dir)
+                    zipf.write(file_path, arcname)
+    
+    def _create_tar_archive(self, source_dir: Path, archive_path: Path, compressed: bool = False):
+        mode = 'w:gz' if compressed else 'w'
+        
+        with tarfile.open(archive_path, mode) as tarf:
+            for file_path in source_dir.rglob('*'):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(source_dir)
+                    tarf.add(file_path, arcname)
+    
+    def _create_rar_archive(self, source_dir: Path, archive_path: Path):
+        if not RAR_AVAILABLE:
+            import subprocess
+            
+            rar_commands = ['rar', 'winrar', 'C:\\Program Files\\WinRAR\\Rar.exe', 'C:\\Program Files (x86)\\WinRAR\\Rar.exe']
+            
+            rar_exe = None
+            for cmd in rar_commands:
+                try:
+                    result = subprocess.run([cmd], capture_output=True, timeout=5)
+                    rar_exe = cmd
+                    break
+                except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+                    continue
+            
+            if not rar_exe:
+                zip_path = archive_path.with_suffix('.zip')
+                self._create_zip_archive(source_dir, zip_path)
+                return zip_path
+            
+            try:
+                subprocess.run([
+                    rar_exe, 'a', '-r', str(archive_path), str(source_dir / '*')
+                ], check=True, capture_output=True)
+                return archive_path
+            except subprocess.CalledProcessError:
+                zip_path = archive_path.with_suffix('.zip')
+                self._create_zip_archive(source_dir, zip_path)
+                return zip_path
+        else:
+            zip_path = archive_path.with_suffix('.zip')
+            self._create_zip_archive(source_dir, zip_path)
+            return zip_path
     
     def get_summary(self, plan: Dict[str, List[str]]) -> str:
         total = sum(len(files) for files in plan.values())
@@ -949,19 +1203,15 @@ class FileSorter:
         return folder_analysis
     
     def get_adaptive_project_suggestions(self) -> Dict[str, List[str]]:
-        """
-        Use the learned organizational patterns to suggest better project groupings.
-        """
         patterns = self.analyze_existing_organization()
         suggestions = {}
         
-        # Group files by their most significant folder
         for file_info in self.files:
             best_folder = None
             best_score = 0
             
             parts = file_info.path.parts
-            for part in parts[:-1]:  # exclude filename
+            for part in parts[:-1]:
                 folder_key = part.lower()
                 if folder_key in patterns and patterns[folder_key] > best_score:
                     best_score = patterns[folder_key]
@@ -1033,7 +1283,6 @@ class FileSorter:
             raise Exception(f"Failed to create backup file: {e}")
     
     def load_backup(self, backup_path: Union[str, Path]) -> Backup:
-        """Load a backup file and return the SortingBackup object"""
         backup_path = Path(backup_path)
         
         if not backup_path.exists():
@@ -1046,13 +1295,11 @@ class FileSorter:
             with open(backup_path, 'r', encoding='utf-8') as f:
                 backup_data = json.load(f)
             
-            # Validate backup format
             required_fields = ['timestamp', 'source_directory', 'strategy_used', 'total_files', 'entries']
             for field in required_fields:
                 if field not in backup_data:
                     raise ValueError(f"Invalid backup file: missing '{field}' field")
             
-            # Create backup object
             backup = Backup(
                 timestamp=backup_data['timestamp'],
                 source_directory=backup_data['source_directory'],
@@ -1061,7 +1308,6 @@ class FileSorter:
                 backup_version=backup_data.get('backup_version', '1.0')
             )
             
-            # Load entries
             for entry_data in backup_data['entries']:
                 entry = BkpEntry(
                     original_path=entry_data['original_path'],
@@ -1081,24 +1327,12 @@ class FileSorter:
             raise Exception(f"Failed to load backup file: {e}")
     
     def restore_from_backup(self, backup_path: Union[str, Path], dry_run: bool = True) -> Dict[str, any]:
-        """
-        Restore files to their original locations using a backup file.
-        
-        Args:
-            backup_path: Path to the .bkp backup file
-            dry_run: If True, only show what would be restored without moving files
-            
-        Returns:
-            Dictionary with restoration results and statistics
-        """
         backup = self.load_backup(backup_path)
         
-        # Verify we're in the correct directory
         current_source = Path(backup.source_directory)
         if not current_source.exists():
             raise ValueError(f"Original source directory not found: {current_source}")
         
-        # Track restoration progress
         results = {
             'total_entries': len(backup.entries),
             'restored': 0,
@@ -1115,29 +1349,22 @@ class FileSorter:
             'user_decisions': []
         }
         
-        # Restore operation starting
-        
-        # First pass: identify all files and their status
         missing_entries = []
         
         for entry in backup.entries:
             try:
-                # Construct current and original paths
                 original_abs_path = current_source / entry.original_path
                 
-                # Try to find the file using multiple methods
                 current_file = self._find_file_for_restore(entry, current_source)
                 
                 if not current_file:
                     missing_entries.append(entry)
                     continue
                 
-                # Check if file is already in the correct location
                 if current_file == original_abs_path:
-                    results['restored'] += 1  # Already in correct place
+                    results['restored'] += 1
                     continue
                 
-                # Check for conflicts at destination
                 if original_abs_path.exists() and original_abs_path != current_file:
                     results['conflicts'] += 1
                     results['conflicts_found'].append({
@@ -1148,10 +1375,8 @@ class FileSorter:
                     continue
                 
                 if not dry_run:
-                    # Create destination directory if needed
                     original_abs_path.parent.mkdir(parents=True, exist_ok=True)
                     
-                    # Move file back to original location
                     shutil.move(str(current_file), str(original_abs_path))
                 
                 results['restored'] += 1
@@ -1163,48 +1388,29 @@ class FileSorter:
                     'error': str(e)
                 })
         
-        # Handle missing files non-interactively
         if missing_entries:
-            # Non-interactive mode - just count as missing
             results['missing'] = len(missing_entries)
             results['missing_files'] = [entry.file_name for entry in missing_entries]
-        
-        # Restore operation complete
         
         return results
     
     def _find_file_for_restore(self, entry: BkpEntry, search_dir: Path) -> Optional[Path]:
-        """
-        Find a file for restoration using multiple identification methods.
-        
-        Args:
-            entry: The backup entry to find
-            search_dir: Directory to search in
-            
-        Returns:
-            Path to the found file, or None if not found
-        """
-        # Method 1: Exact name and size match
         for file_path in search_dir.rglob(entry.file_name):
             if file_path.is_file() and file_path.stat().st_size == entry.file_size:
                 return file_path
         
-        # Method 2: Name match with different size (potential update)
         name_matches = []
         for file_path in search_dir.rglob(entry.file_name):
             if file_path.is_file():
                 name_matches.append(file_path)
         
         if name_matches:
-            # If there's only one file with the same name, it's likely the updated version
             if len(name_matches) == 1:
                 file_path = name_matches[0]
-                # Check if modification time suggests it was updated after backup
                 try:
                     backup_time = datetime.fromisoformat(entry.last_modified)
                     file_time = datetime.fromtimestamp(file_path.stat().st_mtime)
                     if file_time > backup_time:
-                        # File was modified after backup - likely updated
                         return file_path
                 except (ValueError, OSError):
                     pass
@@ -1212,16 +1418,6 @@ class FileSorter:
         return None
     
     def _find_similar_files(self, entry: BkpEntry, search_dir: Path) -> List[Tuple[Path, int]]:
-        """
-        Find files with similar names to the missing file.
-        
-        Args:
-            entry: The backup entry to find similar files for
-            search_dir: Directory to search in
-            
-        Returns:
-            List of tuples (file_path, file_size) sorted by similarity
-        """
         similar_files = []
         entry_name_lower = entry.file_name.lower()
         entry_stem = Path(entry.file_name).stem.lower()
@@ -1233,21 +1429,17 @@ class FileSorter:
             file_name_lower = file_path.name.lower()
             file_stem_lower = file_path.stem.lower()
             
-            # Skip exact matches (these should have been found already)
             if file_path.name == entry.file_name:
                 continue
             
             similarity_score = 0
             
-            # Check for stem similarity (filename without extension)
             if entry_stem in file_stem_lower or file_stem_lower in entry_stem:
                 similarity_score += 3
             
-            # Check for partial name matches
             if entry_stem in file_name_lower or file_name_lower in entry_name_lower:
                 similarity_score += 2
             
-            # Check for same extension
             if Path(entry.file_name).suffix.lower() == file_path.suffix.lower():
                 similarity_score += 1
             
@@ -1258,14 +1450,11 @@ class FileSorter:
                 except OSError:
                     continue
         
-        # Sort by similarity (we could implement more sophisticated scoring)
-        # For now, just sort by name similarity
         similar_files.sort(key=lambda x: x[0].name.lower())
         
         return similar_files
 
     def _format_size(self, size_bytes: int) -> str:
-        """Format file size in human readable format"""
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size_bytes < 1024.0:
                 return f"{size_bytes:.1f} {unit}"
@@ -1273,7 +1462,6 @@ class FileSorter:
         return f"{size_bytes:.1f} TB"
     
     def _format_size(self, size_bytes: int) -> str:
-        """Format file size in human readable format"""
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size_bytes < 1024.0:
                 return f"{size_bytes:.1f} {unit}"
@@ -1281,10 +1469,6 @@ class FileSorter:
         return f"{size_bytes:.1f} TB"
     
     def list_available_backups(self, directory: Optional[Union[str, Path]] = None) -> List[Dict[str, str]]:
-        """
-        List all available backup files in the specified directory.
-        If no directory specified, uses the current source directory.
-        """
         search_dir = Path(directory) if directory else self.source_path
         
         if not search_dir or not search_dir.exists():
@@ -1303,36 +1487,29 @@ class FileSorter:
                     'size': f"{backup_file.stat().st_size} bytes"
                 })
             except Exception:
-                # Skip invalid backup files
                 continue
         
-        # Sort by timestamp (newest first)
         backups.sort(key=lambda x: x['timestamp'], reverse=True)
         return backups
     
     def update_backup_locations(self, backup_path: str, organization_plan: Dict[str, List[str]]) -> None:
-        """Update the backup file with new file locations after organizing"""
         try:
             backup = self.load_backup(backup_path)
             
-            # Create a mapping from filename to new location
             file_to_new_location = {}
             for dest_folder, file_paths in organization_plan.items():
                 for file_path in file_paths:
                     file_name = Path(file_path).name
-                    # Store relative path from source directory
                     try:
                         relative_new_path = Path(dest_folder) / file_name
                         file_to_new_location[file_name] = str(relative_new_path)
                     except Exception:
                         continue
             
-            # Update backup entries with new locations
             for entry in backup.entries:
                 if entry.file_name in file_to_new_location:
                     entry.current_path = file_to_new_location[entry.file_name]
             
-            # Save updated backup
             backup_data = {
                 'timestamp': backup.timestamp,
                 'source_directory': backup.source_directory,
@@ -1356,7 +1533,6 @@ class FileSorter:
                 json.dump(backup_data, f, indent=2, ensure_ascii=False)
                 
         except Exception as e:
-            # Warning: Could not update backup with new locations - continuing silently
             pass
 
     def detection_report(self) -> str:
@@ -1391,7 +1567,6 @@ class FileSorter:
         return report
     
     def version_control_report(self) -> str:
-        """Generate a report about version control detection"""
         if not self.files:
             return "No files analyzed."
         
@@ -1419,7 +1594,6 @@ class FileSorter:
 
 
 def create_example_regex_rules() -> List[CustomRegexRule]:
-    """Create a set of example custom regex rules that users can use as templates"""
     return [
         CustomRegexRule(
             name="Screenshots",
@@ -1492,64 +1666,200 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} TB"
 
 
-def create_test_files(test_folder: Union[str, Path]):
-    """Create test files including some misnamed ones and versioned files"""
-    test_path = Path(test_folder)
-    test_path.mkdir(exist_ok=True)
+class TaskScheduler:
     
-    # Normal files
-    normal_files = [
-        ("vacation.jpg", "fake jpg content"),
-        ("report.pdf", "fake pdf content"), 
-        ("notes.txt", "Meeting notes from yesterday"),
-        ("script.py", "#!/usr/bin/env python\nimport os\nprint('Hello')"),
-        ("data.json", '{"name": "test", "value": 123}'),
-        ("page.html", "<!DOCTYPE html><html><body>Hello</body></html>"),
-        # Custom regex test files
-        ("screenshot_2024_03_15.png", "fake screenshot"),
-        ("invoice_CompanyA_2024-03-10.pdf", "fake invoice"),
-        ("meeting_ProjectX_2024-03-12.docx", "fake meeting notes"),
-        ("backup_database_2024-03-08.sql", "fake backup"),
-        ("photo_vacation_2024_03.jpg", "fake photo"),
-    ]
+    def __init__(self, schedule_file: str = "reorg_schedules.json"):
+        self.schedule_file = Path(schedule_file)
+        self.tasks: Dict[str, ScheduleTask] = {}
+        self.running = False
+        self.scheduler_thread: Optional[threading.Thread] = None
+        self.load_schedules()
     
-    # Misnamed files for testing detection
-    misnamed_files = [
-        ("photo_no_ext", b'\xFF\xD8\xFF\xE0\x00\x10JFIF'),  # JPEG
-        ("document.txt", b'%PDF-1.4\n%\xE2\xE3\xCF\xD3'),  # PDF in txt
-        ("compressed", b'PK\x03\x04\x14\x00\x00\x00'),  # ZIP
-        ("song.doc", b'ID3\x03\x00\x00\x00'),  # MP3 in doc
-        ("movie", b'RIFF\x00\x00\x00\x00AVI '),  # AVI
-        ("python_code", "#!/usr/bin/env python\nprint('Hello world')"),
-        ("web_file", "<!DOCTYPE html>\n<html>\n<body>Test</body>\n</html>"),
-    ]
-    
-    # Versioned files for testing version control
-    versioned_files = [
-        ("myapp_v1.0.exe", b'MZ\x90\x00'),  # Executable v1.0
-        ("myapp_v1.1.exe", b'MZ\x90\x00'),  # Executable v1.1
-        ("myapp_v2.0.exe", b'MZ\x90\x00'),  # Executable v2.0
-        ("gamedata_v1.zip", b'PK\x03\x04'),  # Game data v1
-        ("gamedata_v2.zip", b'PK\x03\x04'),  # Game data v2
-        ("PhotoEditor v1.2.dmg", "fake dmg content"),  # Mac app v1.2
-        ("PhotoEditor v2.0.dmg", "fake dmg content"),  # Mac app v2.0
-        ("backup_2023.tar", "fake tar content"),  # Date-based version
-        ("backup_2024.tar", "fake tar content"),  # Date-based version
-        ("tool_final.exe", b'MZ\x90\x00'),  # Release version
-        ("tool_beta2.exe", b'MZ\x90\x00'),  # Beta version
-    ]
-    
-    import random
-    import time
-    
-    for filename, content in normal_files + misnamed_files + versioned_files:
-        file_path = test_path / filename
-        if isinstance(content, str):
-            file_path.write_text(content)
-        else:
-            file_path.write_bytes(content)
+    def create_task(self, name: str, folder_path: str, strategy: SortBy, 
+                   compression: CompressionFormat, schedule_type: ScheduleType,
+                   scheduled_time: datetime, interval_days: Optional[int] = None,
+                   max_runs: Optional[int] = None) -> str:
+        task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(self.tasks)}"
         
-        # Random timestamps for variety
-        days_ago = random.randint(1, 365)
-        timestamp = time.time() - (days_ago * 24 * 3600)
-        os.utime(file_path, (timestamp, timestamp))
+        task = ScheduleTask(
+            id=task_id,
+            name=name,
+            folder_path=folder_path,
+            strategy=strategy,
+            compression=compression,
+            schedule_type=schedule_type,
+            next_run=scheduled_time,
+            interval_days=interval_days,
+            max_runs=max_runs
+        )
+        
+        self.tasks[task_id] = task
+        self.save_schedules()
+        return task_id
+    
+    def get_task(self, task_id: str) -> Optional[ScheduleTask]:
+        return self.tasks.get(task_id)
+    
+    def get_all_tasks(self) -> List[ScheduleTask]:
+        return list(self.tasks.values())
+    
+    def get_pending_tasks(self) -> List[ScheduleTask]:
+        return [task for task in self.tasks.values() 
+                if task.status == ScheduleStatus.PENDING and task.enabled]
+    
+    def cancel_task(self, task_id: str) -> bool:
+        if task_id in self.tasks:
+            self.tasks[task_id].status = ScheduleStatus.CANCELLED
+            self.save_schedules()
+            return True
+        return False
+    
+    def delete_task(self, task_id: str) -> bool:
+        if task_id in self.tasks:
+            del self.tasks[task_id]
+            self.save_schedules()
+            return True
+        return False
+    
+    def enable_task(self, task_id: str, enabled: bool = True) -> bool:
+        if task_id in self.tasks:
+            self.tasks[task_id].enabled = enabled
+            self.save_schedules()
+            return True
+        return False
+    
+    def start_scheduler(self):
+        if not self.running:
+            self.running = True
+            self.scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+            self.scheduler_thread.start()
+    
+    def stop_scheduler(self):
+        self.running = False
+        if self.scheduler_thread:
+            self.scheduler_thread.join(timeout=5)
+    
+    def _scheduler_loop(self):
+        while self.running:
+            try:
+                now = datetime.now()
+                pending_tasks = self.get_pending_tasks()
+                
+                for task in pending_tasks:
+                    if task.next_run <= now:
+                        self._execute_task(task)
+                
+                time.sleep(30)
+            except Exception as e:
+                print(f"Scheduler error: {e}")
+                time.sleep(60)
+    
+    def _execute_task(self, task: ScheduleTask):
+        try:
+            task.status = ScheduleStatus.RUNNING
+            task.last_run = datetime.now()
+            self.save_schedules()
+            
+            sorter = FileSorter()
+            files = sorter.scan(task.folder_path)
+            
+            result = sorter.organize_files(
+                strategy=task.strategy,
+                dry_run=False,
+                compression=task.compression
+            )
+            
+            task.status = ScheduleStatus.COMPLETED
+            task.run_count += 1
+            task.last_result = f"Processed {len(files)} files"
+            
+            if task.schedule_type != ScheduleType.ONE_TIME:
+                if task.max_runs is None or task.run_count < task.max_runs:
+                    task.next_run = self._calculate_next_run(task)
+                    task.status = ScheduleStatus.PENDING
+                else:
+                    task.status = ScheduleStatus.COMPLETED
+                    task.enabled = False
+            
+        except Exception as e:
+            task.status = ScheduleStatus.FAILED
+            task.error_message = str(e)
+        
+        finally:
+            self.save_schedules()
+    
+    def _calculate_next_run(self, task: ScheduleTask) -> datetime:
+        if task.schedule_type == ScheduleType.DAILY:
+            return task.next_run + timedelta(days=1)
+        elif task.schedule_type == ScheduleType.WEEKLY:
+            return task.next_run + timedelta(weeks=1)
+        elif task.schedule_type == ScheduleType.MONTHLY:
+            return task.next_run + timedelta(days=30)
+        elif task.interval_days:
+            return task.next_run + timedelta(days=task.interval_days)
+        else:
+            return task.next_run + timedelta(days=1)
+    
+    def save_schedules(self):
+        try:
+            tasks_data = {}
+            for task_id, task in self.tasks.items():
+                tasks_data[task_id] = {
+                    'id': task.id,
+                    'name': task.name,
+                    'folder_path': task.folder_path,
+                    'strategy': task.strategy.value,
+                    'compression': task.compression.value,
+                    'schedule_type': task.schedule_type.value,
+                    'next_run': task.next_run.isoformat(),
+                    'status': task.status.value,
+                    'created': task.created.isoformat(),
+                    'last_run': task.last_run.isoformat() if task.last_run else None,
+                    'last_result': task.last_result,
+                    'error_message': task.error_message,
+                    'interval_days': task.interval_days,
+                    'run_count': task.run_count,
+                    'max_runs': task.max_runs,
+                    'enabled': task.enabled
+                }
+            
+            with open(self.schedule_file, 'w') as f:
+                json.dump(tasks_data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save schedules: {e}")
+            print(f"Failed to save schedules: {e}")
+    
+    def load_schedules(self):
+        try:
+            if self.schedule_file.exists():
+                with open(self.schedule_file, 'r') as f:
+                    tasks_data = json.load(f)
+                
+                for task_id, data in tasks_data.items():
+                    task = ScheduleTask(
+                        id=data['id'],
+                        name=data['name'],
+                        folder_path=data['folder_path'],
+                        strategy=SortBy(data['strategy']),
+                        compression=CompressionFormat(data['compression']),
+                        schedule_type=ScheduleType(data['schedule_type']),
+                        next_run=datetime.fromisoformat(data['next_run']),
+                        status=ScheduleStatus(data['status']),
+                        created=datetime.fromisoformat(data['created']),
+                        last_run=datetime.fromisoformat(data['last_run']) if data['last_run'] else None,
+                        last_result=data['last_result'],
+                        error_message=data['error_message'],
+                        interval_days=data['interval_days'],
+                        run_count=data['run_count'],
+                        max_runs=data['max_runs'],
+                        enabled=data['enabled']
+                    )
+                    self.tasks[task_id] = task
+        except Exception as e:
+            print(f"Failed to load schedules: {e}")
+            self.tasks = {}
+
+
+FileInfo = FileData
+SortCriteria = SortBy
+FileCategory = FileCat
