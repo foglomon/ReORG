@@ -227,10 +227,10 @@ class ReorgApp:
                 relative_path = file_info.path.relative_to(Path(source_folder))
                 self.file_tree.insert("", "end", values=(
                     str(relative_path),
-                    file_info.extension or "N/A",
+                    file_info.ext or "N/A",
                     format_size(file_info.size),
                     file_info.modified.strftime("%Y-%m-%d"),
-                    file_info.category.value
+                    file_info.cat.value
                 ))
             
             stats = self.intelligent_sorter.get_stats()
